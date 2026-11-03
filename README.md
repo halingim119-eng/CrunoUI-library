@@ -1,6 +1,6 @@
 # EscTabLib
 
-Roblox **ESC 메뉴에 진짜 탭을 추가**하는 UI 라이브러리. Rayfield 스타일 컨트롤, 모바일 터치 지원, Config 저장/불러오기, 테마 변경.
+UI, 모바일지원, Config 저장/불러오기, 테마 변경.
 
 - 토글 / 선택기 / 버튼 / 슬라이더 / 범위 슬라이더 / 입력창
 - 컬러픽커 / 팔레트 / 드롭다운 / 멀티 드롭다운 / 키바인드
@@ -12,13 +12,13 @@ Roblox **ESC 메뉴에 진짜 탭을 추가**하는 UI 라이브러리. Rayfield
 ## 1. 설치
 
 1. 이 레포에 `EscTabLib.lua`를 올립니다.
-2. 실행기에서 아래처럼 불러옵니다. (`<유저>/<레포>`는 본인 주소로)
+2. 실행기에서 아래처럼 불러옵니다. (
 
 ```lua
 local Lib = loadstring(game:HttpGet("https://raw.githubusercontent.com/<유저>/<레포>/main/EscTabLib.lua"))()
 ```
 
-> 실행기 요구사항: `loadstring`, `game:HttpGet`(또는 `request`). Config 저장은 `writefile/readfile/listfiles/isfolder/makefolder`가 있을 때만 동작합니다. 클립보드 복사는 `setclipboard`가 필요합니다.
+
 
 ---
 
@@ -42,9 +42,7 @@ Win:AddSlider({Name = "FOV", Min = 30, Max = 120, Default = 70, Suffix = "°",
 
 **ESC 키(또는 메뉴 버튼)를 눌러 메뉴를 열면** 탭이 나타납니다. 전체 예제는 `example.lua` 참고.
 
-### 중요: 생성 시점
-UI는 **ESC 메뉴가 처음 열릴 때** 만들어집니다. (메뉴가 열려 있어야 크기를 알 수 있기 때문)
-그 전에 `Add...`를 호출해도 전부 대기열에 쌓였다가 메뉴가 열리면 자동으로 만들어져요. 그래서 스크립트는 평소처럼 위에서 아래로 쓰면 됩니다.
+
 
 - 값이 필요할 땐 `Callback`을 쓰는 게 가장 안전합니다.
 - 생성 이후에 뭔가 해야 하면 `Lib:WaitReady()`로 기다리세요.
