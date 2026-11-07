@@ -15,7 +15,7 @@ local lp = Players.LocalPlayer
 local WHITE = Color3.new(1, 1, 1)
 
 local Lib = {
-    Version = "1.0.0",
+    Version = "1.1.0",
     Flags = {},
     ConfigFolder = "CrunoUI",
     PickerYOffset = 0,
@@ -140,6 +140,7 @@ local function resolveIndex(options, d)
     return 1
 end
 
+------------------------------------------------------------------ icons
 local lucideLib, lucideDone = nil, false
 task.spawn(function()
     local src = httpGet("https://github.com/latte-soft/lucide-roblox/releases/latest/download/lucide-roblox.luau")
@@ -149,13 +150,29 @@ task.spawn(function()
     end
     lucideDone = true
 end)
-local function icon(parent, names, props)
-    local p = {BackgroundTransparency = 1, ImageColor3 = WHITE, ScaleType = Enum.ScaleType.Fit}
-    for k, v in pairs(props or {}) do p[k] = v end
-    local img = make("ImageLabel", p, parent)
+
+local iconTokens = setmetatable({}, {__mode = "k"})
+
+-- names: "info" | {"info", "alert"} | "rbxassetid://123" | 123
+local function applyIcon(img, names)
+    if type(names) == "number" then names = {"rbxassetid://" .. names} end
+    if type(names) == "string" then names = {names} end
+    if type(names) ~= "table" then return end
+
+    local token = (iconTokens[img] or 0) + 1
+    iconTokens[img] = token
+
+    local first = names[1]
+    if type(first) == "string" and first:find("^rbxasset") then
+        img.Image = first
+        img.ImageRectSize = Vector2.zero
+        img.ImageRectOffset = Vector2.zero
+        return
+    end
+
     task.spawn(function()
         while not lucideDone do task.wait(0.1) end
-        if not lucideLib then return end
+        if not lucideLib or iconTokens[img] ~= token then return end
         for _, n in ipairs(names) do
             local ok, a = pcall(lucideLib.GetAsset, n, 256)
             if ok and a then
@@ -166,9 +183,17 @@ local function icon(parent, names, props)
             end
         end
     end)
+end
+
+local function icon(parent, names, props)
+    local p = {BackgroundTransparency = 1, ImageColor3 = WHITE, ScaleType = Enum.ScaleType.Fit}
+    for k, v in pairs(props or {}) do p[k] = v end
+    local img = make("ImageLabel", p, parent)
+    applyIcon(img, names)
     return img
 end
 
+------------------------------------------------------------------ flags / callbacks
 local function setFlag(o, ...)
     if o.Flag then
         if select("#", ...) > 1 then Lib.Flags[o.Flag] = {...} else Lib.Flags[o.Flag] = (...) end
@@ -183,6 +208,7 @@ local function initEmit(o, ...)
     if o.Callback and not o.Silent then task.spawn(o.Callback, ...) end
 end
 
+------------------------------------------------------------------ config
 local function fsOK()
     return writefile and readfile and listfiles and isfolder and makefolder and true or false
 end
@@ -230,6 +256,12 @@ function Lib:LoadConfig(name)
     return true, fileName
 end
 
+------------------------------------------------------------------ hiding the real settings content
+-- 예전 방식: 한 번만 투명도 1로 만들고 끝 -> 메뉴가 열리는 애니메이션/늦게 생성되는 요소가
+--            투명도를 다시 덮어써서 이전 탭이 비쳐 보였음.
+-- 지금 방식: 모든 요소(이미 투명한 것 포함)를 "잡아두고", 값이 바뀌면 즉시 1로 되돌림.
+--            새로 생기는 요소도 DescendantAdded + 주기적 스윕으로 계속 잡음.
+
 local function isCustom(d)
     local n = d
     while n and (not Env or n ~= Env.menuPanel) do
@@ -239,57 +271,79 @@ local function isCustom(d)
     return false
 end
 
-local function remember(list, obj, prop)
-    table.insert(list, {obj, prop, obj[prop]})
-    obj[prop] = 1
+local function newHold()
+    return {recs = {}, map = setmetatable({}, {__mode = "k"})}
 end
 
-local function hideRealIndicator()
-    local e = Env
-    if #e.hidden > 0 then return end
-    local pW = e.menuPanel.AbsoluteSize.X
-    local y0 = e.container.AbsolutePosition.Y - 10
-    local y1 = e.container.AbsolutePosition.Y + e.container.AbsoluteSize.Y + 120
-    for _, d in ipairs(e.menuPanel:GetDescendants()) do
-        if d:IsA("GuiObject") and not isCustom(d) then
-            local s, p = d.AbsoluteSize, d.AbsolutePosition
-            if s.Y > 0 and s.Y <= 10 and s.X >= 40 and s.X < pW * 0.6 and p.Y >= y0 and p.Y <= y1 then
-                if d.BackgroundTransparency < 1 then remember(e.hidden, d, "BackgroundTransparency") end
-                if (d:IsA("ImageLabel") or d:IsA("ImageButton")) and d.ImageTransparency < 1 then
-                    remember(e.hidden, d, "ImageTransparency")
-                end
-                for _, st in ipairs(d:GetChildren()) do
-                    if st:IsA("UIStroke") and st.Transparency < 1 then remember(e.hidden, st, "Transparency") end
-                end
-            end
+local function hold(list, obj, prop)
+    local per = list.map[obj]
+    if not per then
+        per = {}
+        list.map[obj] = per
+    end
+    if per[prop] then return end
+    local rec = {obj = obj, prop = prop, orig = obj[prop], released = false}
+    per[prop] = rec
+    table.insert(list.recs, rec)
+    obj[prop] = 1
+    rec.conn = obj:GetPropertyChangedSignal(prop):Connect(function()
+        if rec.released then return end
+        local cur = obj[prop]
+        if cur ~= 1 then
+            rec.orig = cur -- 원래 UI가 바꾼 최신값을 기억해 두었다가 나중에 복원
+            obj[prop] = 1
+        end
+    end)
+end
+
+local function releaseAll(list)
+    for _, rec in ipairs(list.recs) do
+        rec.released = true
+        if rec.conn then rec.conn:Disconnect() end
+        if rec.obj.Parent then
+            pcall(function() rec.obj[rec.prop] = rec.orig end)
         end
     end
+    list.recs = {}
+    list.map = setmetatable({}, {__mode = "k"})
 end
 
-local function restoreList(list)
-    for _, h in ipairs(list) do
-        if h[1].Parent then h[1][h[2]] = h[3] end
+local function holdObject(list, o)
+    if o:IsA("GuiObject") then hold(list, o, "BackgroundTransparency") end
+    if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
+        hold(list, o, "TextTransparency")
+        hold(list, o, "TextStrokeTransparency")
     end
-    table.clear(list)
-end
-
-local function fadeOne(o)
-    local f = Env.faded
-    if o:IsA("GuiObject") and o.BackgroundTransparency < 1 then remember(f, o, "BackgroundTransparency") end
-    if (o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox")) and o.TextTransparency < 1 then
-        remember(f, o, "TextTransparency")
-    end
-    if (o:IsA("ImageLabel") or o:IsA("ImageButton")) and o.ImageTransparency < 1 then
-        remember(f, o, "ImageTransparency")
-    end
-    if o:IsA("UIStroke") and o.Transparency < 1 then remember(f, o, "Transparency") end
+    if o:IsA("ImageLabel") or o:IsA("ImageButton") then hold(list, o, "ImageTransparency") end
+    if o:IsA("ScrollingFrame") then hold(list, o, "ScrollBarImageTransparency") end
+    if o:IsA("CanvasGroup") then hold(list, o, "GroupTransparency") end
+    if o:IsA("UIStroke") then hold(list, o, "Transparency") end
 end
 
 local function hideRealContent()
     local e = Env
-    if #e.faded > 0 then return end
-    fadeOne(e.content)
-    for _, d in ipairs(e.content:GetDescendants()) do fadeOne(d) end
+    holdObject(e.faded, e.content)
+    for _, d in ipairs(e.content:GetDescendants()) do holdObject(e.faded, d) end
+end
+
+local function hideRealIndicator()
+    local e = Env
+    local pW = e.menuPanel.AbsoluteSize.X
+    local y0 = e.container.AbsolutePosition.Y - 10
+    local y1 = e.container.AbsolutePosition.Y + e.container.AbsoluteSize.Y + 120
+    for _, d in ipairs(e.menuPanel:GetDescendants()) do
+        if d:IsA("GuiObject") then
+            local s, p = d.AbsoluteSize, d.AbsolutePosition
+            if s.Y > 0 and s.Y <= 10 and s.X >= 40 and s.X < pW * 0.6 and p.Y >= y0 and p.Y <= y1
+                and not isCustom(d) then
+                hold(e.hidden, d, "BackgroundTransparency")
+                if d:IsA("ImageLabel") or d:IsA("ImageButton") then hold(e.hidden, d, "ImageTransparency") end
+                for _, st in ipairs(d:GetChildren()) do
+                    if st:IsA("UIStroke") then hold(e.hidden, st, "Transparency") end
+                end
+            end
+        end
+    end
 end
 
 local function relayoutTabs()
@@ -344,6 +398,41 @@ local function paint(w, v)
     end
 end
 
+local function layoutSig()
+    local e = Env
+    local a, b = e.menuPanel.AbsolutePosition, e.menuPanel.AbsoluteSize
+    local c, d = e.container.AbsolutePosition, e.container.AbsoluteSize
+    return string.format("%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f", a.X, a.Y, b.X, b.Y, c.X, c.Y, d.X, d.Y)
+end
+
+-- 탭이 활성화되어 있는 동안: 메뉴가 움직이면 다시 배치하고, 새로 생긴 원본 요소를 계속 가림
+local watchToken = 0
+local function watch(w)
+    watchToken += 1
+    local my = watchToken
+    task.spawn(function()
+        local lastSig = layoutSig()
+        local lastSweep = os.clock()
+        while not destroyed and active == w and watchToken == my and Env do
+            task.wait(0.05)
+            if active ~= w or watchToken ~= my then break end
+            local sig = layoutSig()
+            if sig ~= lastSig then
+                lastSig = sig
+                if w.page.Visible then
+                    layoutPage(w)
+                    w.applyCard()
+                end
+            end
+            if os.clock() - lastSweep >= 0.4 then
+                lastSweep = os.clock()
+                hideRealContent()
+                hideRealIndicator()
+            end
+        end
+    end)
+end
+
 setActive = function(w)
     if not Env or active == w then return end
     local prev = active
@@ -353,12 +442,11 @@ setActive = function(w)
         paint(w, true)
         hideRealIndicator()
         hideRealContent()
-        task.delay(0.1, function()
-            if active == w and w.page.Visible then layoutPage(w) w.applyCard() end
-        end)
+        watch(w)
     else
-        restoreList(Env.hidden)
-        restoreList(Env.faded)
+        watchToken += 1
+        releaseAll(Env.hidden)
+        releaseAll(Env.faded)
     end
 end
 
@@ -369,7 +457,7 @@ local function initCore()
         return false, {window = menuPanel, tabBar = container, tabButton = firstTab, content = content}
     end
     local e = {menuPanel = menuPanel, container = container, firstTab = firstTab, content = content,
-        hidden = {}, faded = {}, origTabs = {}}
+        hidden = newHold(), faded = newHold(), origTabs = {}}
 
     local bestW = -1
     for i, d in ipairs(firstTab:GetDescendants()) do
@@ -399,9 +487,15 @@ local function initCore()
         if c:IsA("GuiObject") then onClick(c, function() setActive(nil) end) end
     end
     bind(GuiService.MenuClosed, function() setActive(nil) end)
+
+    -- 탭이 활성화된 동안 원본 페이지에 새로 생기는 요소도 즉시 가림
+    bind(content.DescendantAdded, function(d)
+        if active and Env then holdObject(Env.faded, d) end
+    end)
     return true
 end
 
+------------------------------------------------------------------ profile card
 local sampledH
 local ipCache
 
@@ -561,6 +655,7 @@ local function buildProfile(w, scroll, probe, showIP)
     end
 end
 
+------------------------------------------------------------------ elements
 local function element(w, name, h)
     local r = make("Frame", {Size = UDim2.new(1, 0, 0, h or 44), BackgroundColor3 = T.Row, BorderSizePixel = 0,
         ClipsDescendants = true, LayoutOrder = w:_order()}, w.scroll)
@@ -573,6 +668,13 @@ local function element(w, name, h)
     r.MouseEnter:Connect(function() tween(r, {BackgroundColor3 = T.Hover}, TweenInfo.new(0.15)) end)
     r.MouseLeave:Connect(function() tween(r, {BackgroundColor3 = T.Row}, TweenInfo.new(0.15)) end)
     return r, title
+end
+
+-- 모든 요소 공통: root(프레임) + setText(제목 변경)
+local function extend(r, title, c)
+    c.root = r
+    c.setText = function(t) title.Text = tostring(t) end
+    return c
 end
 
 local function guiInsetY()
@@ -620,22 +722,84 @@ B.Section = function(w, o)
         Text = tostring(o.Name or o.Text or ""), TextColor3 = T.Text, Font = Enum.Font.GothamBold, TextSize = 22,
         TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
         LayoutOrder = w:_order()}, w.scroll)
-    return {nosave = true, get = function() return l.Text end, set = function(t) l.Text = tostring(t) end}
+    local function setText(t) l.Text = tostring(t) end
+    return {nosave = true, root = l, get = function() return l.Text end, set = setText, setText = setText}
 end
 
+-- Label: Lines(줄 수), Icon(lucide 이름 / rbxassetid), Color, IconColor, TextSize, Font, Align 지원
 B.Label = function(w, o)
+    local ts = tonumber(o.TextSize) or 13
+    local lines = math.max(1, math.floor(tonumber(o.Lines) or 1))
+    local iconSize = 18
+
     local r = make("Frame", {Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = T.Row, BorderSizePixel = 0,
         LayoutOrder = w:_order()}, w.scroll)
     corner(r, 8)
     make("UIStroke", {Color = T.Stroke, Thickness = 1, Transparency = 0.45}, r)
-    local l = make("TextLabel", {BackgroundTransparency = 1, Text = tostring(o.Text or o.Name or ""), TextColor3 = T.Muted,
-        Font = Enum.Font.Gotham, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left,
-        Position = UDim2.fromOffset(14, 0), Size = UDim2.new(1, -28, 1, 0)}, r)
-    return {nosave = true, get = function() return l.Text end, set = function(t) l.Text = tostring(t) end}
+
+    local align = Enum.TextXAlignment.Left
+    if o.Align then
+        local ok, a = pcall(function() return Enum.TextXAlignment[o.Align] end)
+        if ok and a then align = a end
+    end
+    local l = make("TextLabel", {BackgroundTransparency = 1, Text = tostring(o.Text or o.Name or ""),
+        TextColor3 = o.Color or T.Muted, Font = o.Font or Enum.Font.Gotham, TextSize = ts,
+        TextWrapped = true, TextTruncate = Enum.TextTruncate.AtEnd,
+        TextXAlignment = align, TextYAlignment = Enum.TextYAlignment.Center}, r)
+
+    local img
+    local function layout()
+        local lineH = math.ceil(ts * 1.25)
+        r.Size = UDim2.new(1, 0, 0, math.max(36, lines * lineH + 16))
+        local left = 14
+        if img and img.Visible then
+            img.Position = UDim2.new(0, 14, 0.5, 0)
+            left = 14 + iconSize + 8
+        end
+        l.Position = UDim2.fromOffset(left, 0)
+        l.Size = UDim2.new(1, -(left + 14), 1, 0)
+        l.TextSize = ts
+    end
+
+    local function setIcon(name)
+        if name == nil or name == false or name == "" then
+            if img then img.Visible = false end
+        else
+            if not img then
+                img = make("ImageLabel", {AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.fromOffset(iconSize, iconSize),
+                    BackgroundTransparency = 1, ImageColor3 = o.IconColor or WHITE, ScaleType = Enum.ScaleType.Fit}, r)
+            end
+            img.Visible = true
+            applyIcon(img, name)
+        end
+        layout()
+    end
+
+    if o.Icon then setIcon(o.Icon) else layout() end
+
+    local function setText(t) l.Text = tostring(t) end
+    return {
+        nosave = true,
+        root = r,
+        get = function() return l.Text end,
+        set = setText,
+        setText = setText,
+        setLines = function(n)
+            lines = math.max(1, math.floor(tonumber(n) or 1))
+            layout()
+        end,
+        setIcon = setIcon,
+        setColor = function(c) if typeof(c) == "Color3" then l.TextColor3 = c end end,
+        setIconColor = function(c) if img and typeof(c) == "Color3" then img.ImageColor3 = c end end,
+        setTextSize = function(n)
+            ts = tonumber(n) or ts
+            layout()
+        end,
+    }
 end
 
 B.Toggle = function(w, o)
-    local r = element(w, o.Name)
+    local r, title = element(w, o.Name)
     local on = o.Default and true or false
     local sw = make("Frame", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0, 22),
         Size = UDim2.fromOffset(44, 24), BackgroundColor3 = on and T.Accent or T.Off, BorderSizePixel = 0}, r)
@@ -653,11 +817,11 @@ B.Toggle = function(w, o)
     local hit = make("TextButton", {BackgroundTransparency = 1, Text = "", Size = UDim2.new(1, 0, 0, 44)}, r)
     hit.Activated:Connect(function() set(not on) end)
     initEmit(o, on)
-    return {get = function() return on end, set = function(v) set(v) end}
+    return extend(r, title, {get = function() return on end, set = function(v) set(v) end})
 end
 
 B.Selector = function(w, o)
-    local r = element(w, o.Name)
+    local r, title = element(w, o.Name)
     local options = o.Options or {}
     local i = resolveIndex(options, o.Default)
     local pill = make("Frame", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0, 22),
@@ -683,18 +847,18 @@ B.Selector = function(w, o)
     arrowBtn("‹", 0).Activated:Connect(function() set(i - 1) end)
     arrowBtn("›", 1).Activated:Connect(function() set(i + 1) end)
     initEmit(o, options[i])
-    return {
+    return extend(r, title, {
         get = function() return options[i] end,
         set = function(v)
             for k, op in ipairs(options) do
                 if tostring(op) == tostring(v) then set(k) return end
             end
         end,
-    }
+    })
 end
 
 B.Button = function(w, o)
-    local r = element(w, o.Name)
+    local r, title = element(w, o.Name)
     local base = o.Label or "Run"
     local tag = make("TextLabel", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0, 22),
         Size = UDim2.fromOffset(110, 24), BackgroundTransparency = 1, Text = base, TextColor3 = T.Muted,
@@ -712,7 +876,15 @@ B.Button = function(w, o)
             task.delay(1.5, function() tag.Text = base tag.TextColor3 = T.Muted end)
         end
     end)
-    return {nosave = true, get = function() return nil end, set = function() end}
+    return extend(r, title, {
+        nosave = true,
+        get = function() return nil end,
+        set = function() end,
+        setLabel = function(t)
+            base = tostring(t)
+            tag.Text = base
+        end,
+    })
 end
 
 B.Path = function(w, o)
@@ -731,13 +903,13 @@ B.Path = function(w, o)
         pathL.TextColor3 = ok and T.Accent or T.Danger
         task.delay(1.5, function() pathL.Text = text pathL.TextColor3 = T.Muted end)
     end)
-    return {nosave = true, get = function() return text end, set = function(t)
+    return extend(r, title, {nosave = true, get = function() return text end, set = function(t)
         text = tostring(t) pathL.Text = text
-    end}
+    end})
 end
 
 B.Input = function(w, o)
-    local r = element(w, o.Name)
+    local r, title = element(w, o.Name)
     local numeric = o.Numeric
     local box = make("TextBox", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0, 22),
         Size = UDim2.new(0.4, 0, 0, 28), BackgroundColor3 = T.Field, Text = tostring(o.Default or ""),
@@ -761,14 +933,15 @@ B.Input = function(w, o)
         emit(o, value())
     end)
     initEmit(o, value())
-    return {
+    return extend(r, title, {
         get = function() return box.Text end,
         set = function(v) box.Text = tostring(v) clean() emit(o, value()) end,
-    }
+        setPlaceholder = function(t) box.PlaceholderText = tostring(t) end,
+    })
 end
 
 B.Slider = function(w, o)
-    local r = element(w, o.Name)
+    local r, title = element(w, o.Name)
     local min, max = o.Min or 0, o.Max or 100
     local inc = o.Increment or 1
     local suffix = o.Suffix or ""
@@ -799,7 +972,7 @@ B.Slider = function(w, o)
         emit(o, value)
     end)
     initEmit(o, value)
-    return {
+    return extend(r, title, {
         get = function() return value end,
         set = function(v)
             v = tonumber(v)
@@ -808,11 +981,11 @@ B.Slider = function(w, o)
             show(true)
             emit(o, value)
         end,
-    }
+    })
 end
 
 B.ColorPicker = function(w, o)
-    local r = element(w, o.Name)
+    local r, title = element(w, o.Name)
     local default = o.Default or Color3.fromRGB(255, 255, 255)
     local h, s, v = default:ToHSV()
     local swatch = make("TextButton", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0, 22),
@@ -881,17 +1054,17 @@ B.ColorPicker = function(w, o)
         tween(r, {Size = UDim2.new(1, 0, 0, open and 176 or 44)})
     end)
     initEmit(o, Color3.fromHSV(h, s, v))
-    return {
+    return extend(r, title, {
         get = function() return toHex(Color3.fromHSV(h, s, v)) end,
         set = function(x)
             local c = typeof(x) == "Color3" and x or fromHex(x)
             if c then setColor(c) end
         end,
-    }
+    })
 end
 
 B.Dropdown = function(w, o)
-    local r = element(w, o.Name)
+    local r, title = element(w, o.Name)
     local options = o.Options or {}
     local current = options[resolveIndex(options, o.Default)]
     local head = make("TextButton", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0, 22),
@@ -940,18 +1113,18 @@ B.Dropdown = function(w, o)
     end
     head.Activated:Connect(function() setOpen(not open) end)
     initEmit(o, current)
-    return {
+    return extend(r, title, {
         get = function() return current end,
         set = function(x)
             for _, op in ipairs(options) do
                 if tostring(op) == tostring(x) then choose(op) return end
             end
         end,
-    }
+    })
 end
 
 B.MultiDropdown = function(w, o)
-    local r = element(w, o.Name)
+    local r, title = element(w, o.Name)
     local options = o.Options or {}
     local sel = {}
     for _, op in ipairs(o.Default or {}) do sel[op] = true end
@@ -1001,7 +1174,7 @@ B.MultiDropdown = function(w, o)
     end
     refresh(true)
     initEmit(o, result())
-    return {
+    return extend(r, title, {
         get = result,
         set = function(list)
             if type(list) ~= "table" then return end
@@ -1009,11 +1182,11 @@ B.MultiDropdown = function(w, o)
             for _, op in ipairs(list) do sel[op] = true end
             refresh()
         end,
-    }
+    })
 end
 
 B.Keybind = function(w, o)
-    local r = element(w, o.Name)
+    local r, title = element(w, o.Name)
     local d = o.Default
     if type(d) == "string" then
         local ok, k = pcall(function() return Enum.KeyCode[d] end)
@@ -1048,20 +1221,20 @@ B.Keybind = function(w, o)
         end
     end)
     setFlag(o, key)
-    return {
+    return extend(r, title, {
         get = function() return key.Name end,
         set = function(x)
             local ok, k = pcall(function() return Enum.KeyCode[tostring(x)] end)
             if ok and k then key = k idle() setFlag(o, key) end
         end,
-    }
+    })
 end
 
 B.Palette = function(w, o)
     local colors = o.Colors or {}
     local cols, sz, gap = 8, 28, 8
     local rows = math.ceil(#colors / cols)
-    local r = element(w, o.Name, 44 + rows * (sz + gap) + 4)
+    local r, title = element(w, o.Name, 44 + rows * (sz + gap) + 4)
     local cur = 1
     if typeof(o.Default) == "Color3" then
         for i, c in ipairs(colors) do if toHex(c) == toHex(o.Default) then cur = i break end end
@@ -1085,7 +1258,7 @@ B.Palette = function(w, o)
         b.Activated:Connect(function() cur = i mark() emit(o, c) end)
     end
     if colors[cur] then initEmit(o, colors[cur]) end
-    return {
+    return extend(r, title, {
         get = function() return colors[cur] and toHex(colors[cur]) or nil end,
         set = function(x)
             for i, c in ipairs(colors) do
@@ -1093,11 +1266,11 @@ B.Palette = function(w, o)
                 if toHex(c) == hex then cur = i mark() emit(o, c) return end
             end
         end,
-    }
+    })
 end
 
 B.Range = function(w, o)
-    local r = element(w, o.Name)
+    local r, title = element(w, o.Name)
     local min, max = o.Min or 0, o.Max or 100
     local suffix = o.Suffix or ""
     local lo = math.clamp(o.DefaultMin or min, min, max)
@@ -1131,7 +1304,7 @@ B.Range = function(w, o)
     end)
     bind(UserInputService.InputEnded, function() lock = nil end)
     initEmit(o, lo, hi)
-    return {
+    return extend(r, title, {
         get = function() return {lo, hi} end,
         set = function(a, b)
             if type(a) == "table" then a, b = a[1], a[2] end
@@ -1142,16 +1315,65 @@ B.Range = function(w, o)
             render()
             emit(o, lo, hi)
         end,
-    }
+    })
 end
 
+------------------------------------------------------------------ handle (AddXXX 가 돌려주는 값)
 local Handle = {}
 Handle.__index = Handle
-function Handle:Set(...)
-    if self._c then self._c.set(...) else self._pending = table.pack(...) end
+
+-- 창이 아직 만들어지기 전에 호출해도 큐에 쌓였다가 순서대로 실행됨
+local PROXY = {
+    Set = "set",
+    SetValue = "setValue",
+    SetSilent = "setSilent",
+    SetText = "setText",
+    SetInputValue = "setInputValue",
+    SetPlaceholder = "setPlaceholder",
+    SetLabel = "setLabel",
+    SetIcon = "setIcon",
+    SetIconColor = "setIconColor",
+    SetLines = "setLines",
+    SetColor = "setColor",
+    SetTextSize = "setTextSize",
+    SetVisible = "setVisible",
+}
+for method, field in pairs(PROXY) do
+    Handle[method] = function(self, ...)
+        local c = self._c
+        if c then
+            local f = c[field]
+            if f then return f(...) end
+        else
+            table.insert(self._q, {field, table.pack(...)})
+        end
+    end
 end
+
 function Handle:Get()
     if self._c then return self._c.get() end
+end
+
+function Handle:Destroy()
+    if self._c and self._c.root then self._c.root:Destroy() end
+end
+
+local function finalize(c, o)
+    c.setValue = c.setValue or c.set
+    c.setSilent = c.setSilent or function(...)
+        local cb = o.Callback
+        o.Callback = nil
+        local ok, err = pcall(c.set, ...)
+        o.Callback = cb
+        if not ok then warn("[CrunoUI] SetSilent error:", err) end
+    end
+    c.setInputValue = c.setInputValue or function(v, silent)
+        if silent then return c.setSilent(v) end
+        return c.set(v)
+    end
+    if c.root and not c.setVisible then
+        c.setVisible = function(v) c.root.Visible = v and true or false end
+    end
 end
 
 local Window = {}
@@ -1178,21 +1400,29 @@ for _, kind in ipairs(KINDS) do
     Window["Add" .. kind] = function(self, o)
         if type(o) == "string" then o = {Name = o} end
         o = o or {}
-        local h = setmetatable({}, Handle)
+        local h = setmetatable({_q = {}}, Handle)
         defer(self, function()
             local c = B[kind](self, o)
             if not c then return end
+            finalize(c, o)
             h._c = c
             if not c.nosave and o.Name ~= nil then Controls[self.Name .. "/" .. tostring(o.Name)] = c end
-            if h._pending then c.set(table.unpack(h._pending, 1, h._pending.n)) h._pending = nil end
+            for _, item in ipairs(h._q) do
+                local f = c[item[1]]
+                if f then
+                    local ok, err = pcall(f, table.unpack(item[2], 1, item[2].n))
+                    if not ok then warn("[CrunoUI]", err) end
+                end
+            end
+            table.clear(h._q)
         end)
         return h
     end
 end
 
-function Window:Show() if self.Built then setActive(self) end end
 function Window:Close() if active == self then setActive(nil) end end
 
+------------------------------------------------------------------ window building / injector
 local function buildWindow(w)
     local e = Env
     local tab = e.firstTab:Clone()
@@ -1255,35 +1485,46 @@ local function buildWindow(w)
     table.clear(w.Queue)
 end
 
+-- 설정창이 열려 있을 때 한 번 돌려서: 코어 초기화 + 아직 안 만든 창 생성
+local function pump()
+    if destroyed then return false end
+    if not Env then
+        local ok, missing = initCore()
+        if not ok then return false, missing end
+    end
+    for _, w in ipairs(Windows) do
+        if not w.Built and not w.Building then
+            w.Building = true
+            local ok, err = pcall(buildWindow, w)
+            if not ok then warn("[CrunoUI] 창 생성 실패:", err) end
+        end
+    end
+    return true
+end
+
 local injectorStarted = false
 local function startInjector()
     if injectorStarted then return end
     injectorStarted = true
+    bind(GuiService.MenuOpened, function() task.defer(pump) end)
     task.spawn(function()
         local fails = 0
         while not destroyed do
+            local allBuilt = Env ~= nil
             if Env or GuiService.MenuIsOpen then
-                if not Env then
-                    local ok, missing = initCore()
-                    if not ok then
-                        fails += 1
-                        if fails == 5 then
-                            warn("[CrunoUI] ESC 메뉴 경로를 못 찾음:")
-                            for k, v in pairs(missing or {}) do warn(k, v and "OK" or "MISSING") end
-                        end
+                local ok, missing = pump()
+                if ok == false and not Env then
+                    fails += 1
+                    if fails == 20 then
+                        warn("[CrunoUI] ESC 메뉴 경로를 못 찾음:")
+                        for k, v in pairs(missing or {}) do warn(k, v and "OK" or "MISSING") end
                     end
                 end
-                if Env then
-                    for _, w in ipairs(Windows) do
-                        if not w.Built and not w.Building then
-                            w.Building = true
-                            local ok, err = pcall(buildWindow, w)
-                            if not ok then warn("[CrunoUI] 창 생성 실패:", err) end
-                        end
-                    end
+                for _, w in ipairs(Windows) do
+                    if not w.Built then allBuilt = false break end
                 end
             end
-            task.wait(0.5)
+            task.wait(allBuilt and 0.5 or 0.15)
         end
     end)
 end
@@ -1303,6 +1544,61 @@ function Lib:AddWindow(opts)
     startInjector()
     return w
 end
+
+------------------------------------------------------------------ ShowTab
+local function findWindow(x)
+    for _, w in ipairs(Windows) do
+        if w == x or w.Name == x or w.Index == x then return w end
+    end
+    if type(x) == "string" then
+        local l = x:lower()
+        for _, w in ipairs(Windows) do
+            if w.Name:lower() == l then return w end
+        end
+    end
+end
+
+local function openMenu()
+    if GuiService.MenuIsOpen then return end
+    pcall(function() GuiService:SetMenuIsOpen(true) end)
+    local t0 = os.clock()
+    while os.clock() - t0 < 0.15 do
+        if GuiService.MenuIsOpen then return end
+        task.wait()
+    end
+    -- SetMenuIsOpen 이 막혀 있는 실행기를 위한 대체: ESC 키 입력 흉내
+    pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        vim:SendKeyEvent(true, Enum.KeyCode.Escape, false, game)
+        task.wait()
+        vim:SendKeyEvent(false, Enum.KeyCode.Escape, false, game)
+    end)
+end
+
+-- Lib:ShowTab("탭이름") : 설정창 열기 -> 해당 탭으로 즉시 이동
+function Lib:ShowTab(name)
+    local w = findWindow(name)
+    if not w then return false, "tab not found: " .. tostring(name) end
+    task.spawn(function()
+        openMenu()
+        local t0 = os.clock()
+        while not destroyed and os.clock() - t0 < 6 do
+            if GuiService.MenuIsOpen then
+                pump()
+                local e = Env
+                if w.Built and e and e.menuPanel.AbsoluteSize.Y > 0 and e.container.AbsoluteSize.Y > 0 then
+                    setActive(w)
+                    return
+                end
+            end
+            task.wait()
+        end
+    end)
+    return true
+end
+
+function Window:ShowTab(name) return Lib:ShowTab(name ~= nil and name or self) end
+function Window:Show() return Lib:ShowTab(self) end
 
 function Lib:WaitReady()
     while not destroyed do
