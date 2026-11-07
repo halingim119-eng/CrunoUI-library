@@ -15,7 +15,7 @@ local lp = Players.LocalPlayer
 local WHITE = Color3.new(1, 1, 1)
 
 local Lib = {
-    Version = "1.1.0",
+    Version = "1.1.1",
     Flags = {},
     ConfigFolder = "CrunoUI",
     PickerYOffset = 0,
@@ -140,7 +140,6 @@ local function resolveIndex(options, d)
     return 1
 end
 
------------------------------------------------------------------- icons
 local lucideLib, lucideDone = nil, false
 task.spawn(function()
     local src = httpGet("https://github.com/latte-soft/lucide-roblox/releases/latest/download/lucide-roblox.luau")
@@ -153,7 +152,6 @@ end)
 
 local iconTokens = setmetatable({}, {__mode = "k"})
 
--- names: "info" | {"info", "alert"} | "rbxassetid://123" | 123
 local function applyIcon(img, names)
     if type(names) == "number" then names = {"rbxassetid://" .. names} end
     if type(names) == "string" then names = {names} end
@@ -193,7 +191,6 @@ local function icon(parent, names, props)
     return img
 end
 
------------------------------------------------------------------- flags / callbacks
 local function setFlag(o, ...)
     if o.Flag then
         if select("#", ...) > 1 then Lib.Flags[o.Flag] = {...} else Lib.Flags[o.Flag] = (...) end
@@ -208,7 +205,6 @@ local function initEmit(o, ...)
     if o.Callback and not o.Silent then task.spawn(o.Callback, ...) end
 end
 
------------------------------------------------------------------- config
 local function fsOK()
     return writefile and readfile and listfiles and isfolder and makefolder and true or false
 end
@@ -256,12 +252,6 @@ function Lib:LoadConfig(name)
     return true, fileName
 end
 
------------------------------------------------------------------- hiding the real settings content
--- 예전 방식: 한 번만 투명도 1로 만들고 끝 -> 메뉴가 열리는 애니메이션/늦게 생성되는 요소가
---            투명도를 다시 덮어써서 이전 탭이 비쳐 보였음.
--- 지금 방식: 모든 요소(이미 투명한 것 포함)를 "잡아두고", 값이 바뀌면 즉시 1로 되돌림.
---            새로 생기는 요소도 DescendantAdded + 주기적 스윕으로 계속 잡음.
-
 local function isCustom(d)
     local n = d
     while n and (not Env or n ~= Env.menuPanel) do
@@ -290,7 +280,7 @@ local function hold(list, obj, prop)
         if rec.released then return end
         local cur = obj[prop]
         if cur ~= 1 then
-            rec.orig = cur -- 원래 UI가 바꾼 최신값을 기억해 두었다가 나중에 복원
+            rec.orig = cur
             obj[prop] = 1
         end
     end)
@@ -405,7 +395,6 @@ local function layoutSig()
     return string.format("%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f", a.X, a.Y, b.X, b.Y, c.X, c.Y, d.X, d.Y)
 end
 
--- 탭이 활성화되어 있는 동안: 메뉴가 움직이면 다시 배치하고, 새로 생긴 원본 요소를 계속 가림
 local watchToken = 0
 local function watch(w)
     watchToken += 1
@@ -450,11 +439,25 @@ setActive = function(w)
     end
 end
 
+local function reveal(w)
+    if active == w then
+        paint(w, true)
+        hideRealIndicator()
+        hideRealContent()
+        watch(w)
+    else
+        setActive(w)
+    end
+end
+
 local function initCore()
     if Env then return true end
     local menuPanel, container, firstTab, content = getRefs()
     if not (menuPanel and container and firstTab and content) then
         return false, {window = menuPanel, tabBar = container, tabButton = firstTab, content = content}
+    end
+    if menuPanel.AbsoluteSize.Y <= 0 or container.AbsoluteSize.Y <= 0 or firstTab.AbsoluteSize.X <= 0 then
+        return false, {layout = false}
     end
     local e = {menuPanel = menuPanel, container = container, firstTab = firstTab, content = content,
         hidden = newHold(), faded = newHold(), origTabs = {}}
@@ -487,15 +490,12 @@ local function initCore()
         if c:IsA("GuiObject") then onClick(c, function() setActive(nil) end) end
     end
     bind(GuiService.MenuClosed, function() setActive(nil) end)
-
-    -- 탭이 활성화된 동안 원본 페이지에 새로 생기는 요소도 즉시 가림
     bind(content.DescendantAdded, function(d)
         if active and Env then holdObject(Env.faded, d) end
     end)
     return true
 end
 
------------------------------------------------------------------- profile card
 local sampledH
 local ipCache
 
@@ -655,7 +655,6 @@ local function buildProfile(w, scroll, probe, showIP)
     end
 end
 
------------------------------------------------------------------- elements
 local function element(w, name, h)
     local r = make("Frame", {Size = UDim2.new(1, 0, 0, h or 44), BackgroundColor3 = T.Row, BorderSizePixel = 0,
         ClipsDescendants = true, LayoutOrder = w:_order()}, w.scroll)
@@ -670,7 +669,6 @@ local function element(w, name, h)
     return r, title
 end
 
--- 모든 요소 공통: root(프레임) + setText(제목 변경)
 local function extend(r, title, c)
     c.root = r
     c.setText = function(t) title.Text = tostring(t) end
@@ -726,7 +724,6 @@ B.Section = function(w, o)
     return {nosave = true, root = l, get = function() return l.Text end, set = setText, setText = setText}
 end
 
--- Label: Lines(줄 수), Icon(lucide 이름 / rbxassetid), Color, IconColor, TextSize, Font, Align 지원
 B.Label = function(w, o)
     local ts = tonumber(o.TextSize) or 13
     local lines = math.max(1, math.floor(tonumber(o.Lines) or 1))
@@ -1318,11 +1315,9 @@ B.Range = function(w, o)
     })
 end
 
------------------------------------------------------------------- handle (AddXXX 가 돌려주는 값)
 local Handle = {}
 Handle.__index = Handle
 
--- 창이 아직 만들어지기 전에 호출해도 큐에 쌓였다가 순서대로 실행됨
 local PROXY = {
     Set = "set",
     SetValue = "setValue",
@@ -1422,7 +1417,6 @@ end
 
 function Window:Close() if active == self then setActive(nil) end end
 
------------------------------------------------------------------- window building / injector
 local function buildWindow(w)
     local e = Env
     local tab = e.firstTab:Clone()
@@ -1485,7 +1479,6 @@ local function buildWindow(w)
     table.clear(w.Queue)
 end
 
--- 설정창이 열려 있을 때 한 번 돌려서: 코어 초기화 + 아직 안 만든 창 생성
 local function pump()
     if destroyed then return false end
     if not Env then
@@ -1545,7 +1538,6 @@ function Lib:AddWindow(opts)
     return w
 end
 
------------------------------------------------------------------- ShowTab
 local function findWindow(x)
     for _, w in ipairs(Windows) do
         if w == x or w.Name == x or w.Index == x then return w end
@@ -1559,46 +1551,69 @@ local function findWindow(x)
 end
 
 local function openMenu()
-    if GuiService.MenuIsOpen then return end
+    if GuiService.MenuIsOpen then return true end
     pcall(function() GuiService:SetMenuIsOpen(true) end)
     local t0 = os.clock()
-    while os.clock() - t0 < 0.15 do
-        if GuiService.MenuIsOpen then return end
+    while os.clock() - t0 < 0.3 do
+        if GuiService.MenuIsOpen then return true end
         task.wait()
     end
-    -- SetMenuIsOpen 이 막혀 있는 실행기를 위한 대체: ESC 키 입력 흉내
     pcall(function()
         local vim = game:GetService("VirtualInputManager")
         vim:SendKeyEvent(true, Enum.KeyCode.Escape, false, game)
         task.wait()
         vim:SendKeyEvent(false, Enum.KeyCode.Escape, false, game)
     end)
+    t0 = os.clock()
+    while os.clock() - t0 < 1 do
+        if GuiService.MenuIsOpen then return true end
+        task.wait()
+    end
+    return GuiService.MenuIsOpen
 end
 
--- Lib:ShowTab("탭이름") : 설정창 열기 -> 해당 탭으로 즉시 이동
-function Lib:ShowTab(name)
-    local w = findWindow(name)
-    if not w then return false, "tab not found: " .. tostring(name) end
+function Lib.ShowTab(a, b)
+    local target = a
+    if a == Lib then target = b end
+    local w = findWindow(target)
+    if not w then
+        warn("[CrunoUI] ShowTab: 탭을 찾을 수 없음:", tostring(target))
+        return false, "tab not found: " .. tostring(target)
+    end
     task.spawn(function()
-        openMenu()
+        if not openMenu() then
+            warn("[CrunoUI] ShowTab: 설정창을 열지 못함")
+            return
+        end
         local t0 = os.clock()
         while not destroyed and os.clock() - t0 < 6 do
             if GuiService.MenuIsOpen then
                 pump()
                 local e = Env
                 if w.Built and e and e.menuPanel.AbsoluteSize.Y > 0 and e.container.AbsoluteSize.Y > 0 then
-                    setActive(w)
+                    reveal(w)
+                    local t1 = os.clock()
+                    while not destroyed and os.clock() - t1 < 0.5 do
+                        task.wait()
+                        if GuiService.MenuIsOpen and active ~= w then reveal(w) end
+                    end
                     return
                 end
             end
             task.wait()
         end
+        warn("[CrunoUI] ShowTab: 시간 초과 (Env=" .. tostring(Env ~= nil) .. ", Built=" .. tostring(w.Built) .. ")")
     end)
     return true
 end
 
-function Window:ShowTab(name) return Lib:ShowTab(name ~= nil and name or self) end
-function Window:Show() return Lib:ShowTab(self) end
+function Window:ShowTab(name)
+    return Lib.ShowTab(Lib, name ~= nil and name or self)
+end
+
+function Window:Show()
+    return Lib.ShowTab(Lib, self)
+end
 
 function Lib:WaitReady()
     while not destroyed do
