@@ -32,7 +32,7 @@ end
 elevate()
 
 local Lib = {
-    Version = "1.2.3",
+    Version = "1.2.4",
     Flags = {},
     ConfigFolder = "CrunoUI",
     PickerYOffset = 0,
@@ -1584,7 +1584,7 @@ local function findWindow(x)
     end
 end
 
--- ===== ShowTab (v1.2.3) =====
+-- ===== ShowTab (v1.2.4) =====
 -- 새 스레드 / require / 대기(yield) 없이, Heartbeat 콜백에서 상태머신으로 진행한다.
 -- CoreGui를 읽는 곳은 전부 pcall로 보호하고, 읽기가 막히면 GuiService.MenuIsOpen으로 대신 판단한다.
 
@@ -1739,6 +1739,7 @@ end
 bind(RunService.Heartbeat, function()
     local req = show
     if not req or destroyed then return end
+    pcall(elevate)
     local ok, err = pcall(stepShow, req, os.clock())
     if not ok then
         local msg = tostring(err)
@@ -1753,7 +1754,6 @@ bind(RunService.Heartbeat, function()
             warn("[CrunoUI] ShowTab: 오류가 계속되어 중단함")
             if show == req then show = nil end
         end
-        pcall(elevate)
     end
 end)
 
@@ -1817,7 +1817,7 @@ function Lib:Destroy()
     table.clear(conns)
     table.clear(Controls)
     table.clear(Lib.Flags)
-    if env.CrunoUI == Lib else nil end
+    if env.CrunoUI == Lib then env.CrunoUI = nil end
 end
 
 env.CrunoUI = Lib
