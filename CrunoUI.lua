@@ -15,7 +15,7 @@ local lp = Players.LocalPlayer
 local WHITE = Color3.new(1, 1, 1)
 
 local Lib = {
-    Version = "1.1.2",
+    Version = "1.1.3",
     Flags = {},
     ConfigFolder = "CrunoUI",
     PickerYOffset = 0,
@@ -1550,14 +1550,7 @@ local function findWindow(x)
     end
 end
 
--- ===== ShowTab (fixed) =====
-local function menuVisible()
-    local shield = follow(CoreGui, "RobloxGui", "SettingsClippingShield", "SettingsShield")
-    local window = shield and shield:FindFirstChild("MenuContainer")
-    if not (shield and window) then return false end
-    return shield.Visible and window.Visible and window.AbsoluteSize.Y > 0
-end
-
+-- ===== ShowTab (v1.1.3) =====
 local function pressEscape()
     pcall(function()
         local vim = game:GetService("VirtualInputManager")
@@ -1567,35 +1560,22 @@ local function pressEscape()
     end)
 end
 
-local function waitVisible(t)
+local function waitOpen(t)
     local t0 = os.clock()
     while os.clock() - t0 < t do
-        if GuiService.MenuIsOpen and menuVisible() then return true end
+        if GuiService.MenuIsOpen then return true end
         task.wait()
     end
-    return false
+    return GuiService.MenuIsOpen
 end
 
+-- MenuIsOpen만 기준으로 판단. ESC는 최대 1번만 눌러서 열었다 닫히는 일이 없게 함
 local function openMenu()
-    if GuiService.MenuIsOpen and menuVisible() then return true end
-
-    -- 1) API로 열기
-    if not GuiService.MenuIsOpen then
-        pcall(function() GuiService:SetMenuIsOpen(true) end)
-        if waitVisible(0.5) then return true end
-    end
-
-    -- 2) 상태만 true이고 실제로는 안 보이면: 닫았다가 ESC로 다시 열기
-    if GuiService.MenuIsOpen and not menuVisible() then
-        pcall(function() GuiService:SetMenuIsOpen(false) end)
-        task.wait(0.15)
-    end
+    if GuiService.MenuIsOpen then return true end
+    pcall(function() GuiService:SetMenuIsOpen(true) end)
+    if waitOpen(0.4) then return true end
     pressEscape()
-    if waitVisible(1.5) then return true end
-
-    -- 3) 마지막 시도: 한 번 더 ESC
-    pressEscape()
-    return waitVisible(1.5)
+    return waitOpen(1.5)
 end
 
 function Lib.ShowTab(a, b)
@@ -1612,8 +1592,15 @@ function Lib.ShowTab(a, b)
             return
         end
         local t0 = os.clock()
+        local retried = false
         while not destroyed and os.clock() - t0 < 6 do
-            if GuiService.MenuIsOpen then
+            if not GuiService.MenuIsOpen then
+                -- 열리다가 닫혔으면 딱 한 번만 다시 열기
+                if not retried then
+                    retried = true
+                    openMenu()
+                end
+            else
                 pump()
                 local e = Env
                 if w.Built and e and e.menuPanel.AbsoluteSize.Y > 0 and e.container.AbsoluteSize.Y > 0 then
