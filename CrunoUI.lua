@@ -32,7 +32,7 @@ end
 elevate()
 
 local Lib = {
-    Version = "1.2.4",
+    Version = "1.2.5",
     Flags = {},
     ConfigFolder = "CrunoUI",
     PickerYOffset = 0,
@@ -1584,7 +1584,9 @@ local function findWindow(x)
     end
 end
 
--- ===== ShowTab (v1.2.4) =====
+-- ===== ShowTab (v1.2.5) =====
+-- 가상 클릭(ESC 키 입력) 방식 제거: 모바일에서 마우스 커서가 나타나는 문제 때문.
+-- 설정창은 GuiService:SetMenuIsOpen API로만 연다.
 -- 새 스레드 / require / 대기(yield) 없이, Heartbeat 콜백에서 상태머신으로 진행한다.
 -- CoreGui를 읽는 곳은 전부 pcall로 보호하고, 읽기가 막히면 GuiService.MenuIsOpen으로 대신 판단한다.
 
@@ -1620,28 +1622,6 @@ local function menuOpenStrict()
     return GuiService.MenuIsOpen and true or false
 end
 
--- ESC 키 입력 (CoreGui를 건드리지 않음)
-local function pressEscape()
-    local vimOk, vim = pcall(function() return game:GetService("VirtualInputManager") end)
-    if vimOk and vim then
-        task.spawn(function()
-            pcall(function() vim:SendKeyEvent(true, Enum.KeyCode.Escape, false, game) end)
-            task.wait(0.05)
-            pcall(function() vim:SendKeyEvent(false, Enum.KeyCode.Escape, false, game) end)
-        end)
-        return "vim"
-    end
-    if keypress and keyrelease then
-        task.spawn(function()
-            pcall(keypress, 0x1B)
-            task.wait(0.05)
-            pcall(keyrelease, 0x1B)
-        end)
-        return "keypress"
-    end
-    return nil
-end
-
 local showToken = 0
 local show = nil
 local lastErr, lastErrT = nil, 0
@@ -1664,7 +1644,7 @@ local function stepShow(req, now)
             req.deadline = now + 6
             return
         end
-        if req.attempt >= 5 then return end -- 자동으로 못 열었음: 사용자가 직접 열 때까지 대기
+        if req.attempt >= 3 then return end -- 자동으로 못 열었음: 사용자가 직접 열 때까지 대기
 
         if req.attempt == 0 then
             if GuiService.MenuIsOpen then
@@ -1684,30 +1664,17 @@ local function stepShow(req, now)
 
         if now < req.nextAt then return end
 
-        if req.attempt == 1 or req.attempt == 2 then
-            if req.attempt == 2 and GuiService.MenuIsOpen then
-                req.attempt = 3 -- 이미 켜져 있는데 ESC를 또 누르면 닫히므로 건너뜀
-                return
-            end
-            local how = pressEscape()
-            req.log[#req.log + 1] = "esc" .. req.attempt .. "=" .. tostring(how)
-            if how then
-                req.attempt += 1
-                req.nextAt = now + 1.2
-            else
-                req.attempt = 3
-            end
-        elseif req.attempt == 3 then
+        if req.attempt == 1 then
             pcall(function() GuiService:SetMenuIsOpen(true) end)
             req.log[#req.log + 1] = "api"
-            req.attempt = 4
+            req.attempt = 2
             req.nextAt = now + 0.8
-        elseif req.attempt == 4 then
+        elseif req.attempt == 2 then
             if GuiService.MenuIsOpen and not menuOpenStrict() then
                 pcall(function() GuiService:SetMenuIsOpen(false) end)
             end
             req.log[#req.log + 1] = "flag=" .. tostring(GuiService.MenuIsOpen)
-            req.attempt = 5
+            req.attempt = 3
             req.deadline = req.t0 + 60
             warn("[CrunoUI] ShowTab: 설정창을 자동으로 열지 못함 [" .. table.concat(req.log, ", ")
                 .. "] identity=" .. identityStr()
