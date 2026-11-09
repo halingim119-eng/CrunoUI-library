@@ -15,7 +15,7 @@ local lp = Players.LocalPlayer
 local WHITE = Color3.new(1, 1, 1)
 
 local Lib = {
-    Version = "1.1.3",
+    Version = "1.2.0",
     Flags = {},
     ConfigFolder = "CrunoUI",
     PickerYOffset = 0,
@@ -1550,32 +1550,143 @@ local function findWindow(x)
     end
 end
 
--- ===== ShowTab (v1.1.3) =====
-local function pressEscape()
-    pcall(function()
-        local vim = game:GetService("VirtualInputManager")
-        vim:SendKeyEvent(true, Enum.KeyCode.Escape, false, game)
-        task.wait()
-        vim:SendKeyEvent(false, Enum.KeyCode.Escape, false, game)
-    end)
+-- ===== ShowTab (v1.2.0) =====
+local function getShield()
+    return follow(CoreGui, "RobloxGui", "SettingsClippingShield", "SettingsShield")
 end
 
-local function waitOpen(t)
+-- MenuContainer가 실제로 화면 안에 있는지 (닫힌 상태에서는 화면 위쪽 밖에 있음)
+local function geometryOk()
+    local shield = getShield()
+    local window = shield and shield:FindFirstChild("MenuContainer")
+    if not window then return false, nil end
+    local ap, as = window.AbsolutePosition, window.AbsoluteSize
+    return (as.X > 0 and as.Y > 0 and ap.Y + as.Y > 0), shield
+end
+
+-- 엄격: 화면에 실제로 떠 있을 때만 true
+local function isOpen()
+    local ok, shield = geometryOk()
+    return (ok and shield.Visible) and true or false
+end
+
+-- 느슨: 엔진 플래그가 켜져 있으면 Visible 값이 이상해도 열린 것으로 취급
+local function looseOpen()
+    local ok, shield = geometryOk()
+    return (ok and (shield.Visible or GuiService.MenuIsOpen)) and true or false
+end
+
+local function waitFor(fn, t)
     local t0 = os.clock()
     while os.clock() - t0 < t do
-        if GuiService.MenuIsOpen then return true end
+        if fn() then return true end
         task.wait()
     end
-    return GuiService.MenuIsOpen
+    return fn()
 end
 
--- MenuIsOpen만 기준으로 판단. ESC는 최대 1번만 눌러서 열었다 닫히는 일이 없게 함
+-- 1순위: Roblox 설정 허브 모듈을 직접 호출 (이미 로드된 모듈만 사용)
+local function tryHub()
+    local ok, err = pcall(function()
+        if not getShield() then error("shield-missing", 0) end
+        local mod = follow(CoreGui, "RobloxGui", "Modules", "Settings", "SettingsHub")
+        if not mod then error("module-missing", 0) end
+        local hub = require(mod)
+        if type(hub) ~= "table" or type(hub.SetVisibility) ~= "function" then error("bad-module", 0) end
+        hub:SetVisibility(true)
+    end)
+    if ok then return "ok" end
+    return "err:" .. tostring(err):sub(1, 50)
+end
+
+-- 2순위: ESC 키 입력
+local function pressEscape()
+    local ok = pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        vim:SendKeyEvent(true, Enum.KeyCode.Escape, false, game)
+        task.wait(0.05)
+        vim:SendKeyEvent(false, Enum.KeyCode.Escape, false, game)
+    end)
+    if ok then return "vim" end
+    if keypress and keyrelease then
+        if pcall(function()
+            keypress(0x1B)
+            task.wait(0.05)
+            keyrelease(0x1B)
+        end) then return "keypress" end
+    end
+    return nil
+end
+
+-- 설정창 열기. 반환: 열렸는지, 시도 내역(진단용)
 local function openMenu()
-    if GuiService.MenuIsOpen then return true end
+    local rep = {}
+    if looseOpen() then return true, rep end
+
+    -- 0) 엔진 플래그만 켜지고 UI는 닫혀 있는 불일치 상태면 초기화
+    if GuiService.MenuIsOpen then
+        if waitFor(looseOpen, 0.35) then return true, rep end
+        pcall(function() GuiService:SetMenuIsOpen(false) end)
+        task.wait(0.2)
+        rep[#rep + 1] = "flag-reset"
+    end
+
+    -- 1) SettingsHub 직접 호출
+    local r = tryHub()
+    rep[#rep + 1] = "hub=" .. r
+    if r == "ok" and waitFor(looseOpen, 1) then return true, rep end
+
+    -- 2) ESC 키 (최대 2번. 이미 열렸으면 다시 누르지 않음)
+    for i = 1, 2 do
+        if looseOpen() then return true, rep end
+        local how = pressEscape()
+        rep[#rep + 1] = "esc" .. i .. "=" .. tostring(how)
+        if not how then break end
+        if waitFor(looseOpen, 1.2) then return true, rep end
+    end
+
+    -- 3) 마지막 수단: 엔진 API (플래그만 바뀌고 UI는 안 뜨는 경우가 많아서 실제 UI로 검증)
     pcall(function() GuiService:SetMenuIsOpen(true) end)
-    if waitOpen(0.4) then return true end
-    pressEscape()
-    return waitOpen(1.5)
+    if waitFor(isOpen, 0.6) then
+        rep[#rep + 1] = "api=ok"
+        return true, rep
+    end
+    rep[#rep + 1] = "api=flag-only(" .. tostring(GuiService.MenuIsOpen) .. ")"
+    if GuiService.MenuIsOpen then pcall(function() GuiService:SetMenuIsOpen(false) end) end
+    return false, rep
+end
+
+local showToken = 0
+
+-- 메뉴가 열려 있고 레이아웃이 준비되면 탭을 띄우고 잠시 유지
+-- 반환: "ok" / "closed" / "cancelled" / "timeout"
+local function revealWhenReady(w, my, timeout)
+    local t0 = os.clock()
+    while not destroyed and os.clock() - t0 < timeout do
+        if showToken ~= my then return "cancelled" end
+        if looseOpen() then
+            pump()
+            local e = Env
+            if w.Built and e and e.menuPanel.AbsoluteSize.Y > 0 and e.container.AbsoluteSize.Y > 0 then
+                reveal(w)
+                -- 열림 애니메이션/기본 탭 전환이 끝날 때까지 유지
+                local t1 = os.clock()
+                while not destroyed and os.clock() - t1 < 1.2 do
+                    task.wait()
+                    if showToken ~= my then return "cancelled" end
+                    if not looseOpen() then return "closed" end
+                    if active ~= w then
+                        reveal(w)
+                    elseif w.page and not w.page.Visible then
+                        paint(w, true)
+                    end
+                end
+                return "ok"
+            end
+        end
+        task.wait()
+    end
+    return "timeout"
 end
 
 function Lib.ShowTab(a, b)
@@ -1586,42 +1697,22 @@ function Lib.ShowTab(a, b)
         warn("[CrunoUI] ShowTab: 탭을 찾을 수 없음:", tostring(target))
         return false, "tab not found: " .. tostring(target)
     end
+    showToken = showToken + 1
+    local my = showToken
     task.spawn(function()
-        if not openMenu() then
-            warn("[CrunoUI] ShowTab: 설정창을 열지 못함")
-            return
+        local opened, rep = openMenu()
+        if showToken ~= my then return end
+        local timeout = 6
+        if not opened then
+            -- 자동으로 못 열어도, 사용자가 직접 열면 그때 이 탭을 띄움
+            timeout = 60
+            warn("[CrunoUI] ShowTab: 설정창을 자동으로 열지 못함 [" .. table.concat(rep, ", ")
+                .. "] - ESC로 직접 열면 '" .. w.Name .. "' 탭이 자동으로 선택됩니다.")
         end
-        local t0 = os.clock()
-        local retried = false
-        while not destroyed and os.clock() - t0 < 6 do
-            if not GuiService.MenuIsOpen then
-                -- 열리다가 닫혔으면 딱 한 번만 다시 열기
-                if not retried then
-                    retried = true
-                    openMenu()
-                end
-            else
-                pump()
-                local e = Env
-                if w.Built and e and e.menuPanel.AbsoluteSize.Y > 0 and e.container.AbsoluteSize.Y > 0 then
-                    reveal(w)
-                    -- 열림 애니메이션/기본 탭 전환이 끝날 때까지 계속 유지
-                    local t1 = os.clock()
-                    while not destroyed and os.clock() - t1 < 1.2 do
-                        task.wait()
-                        if not GuiService.MenuIsOpen then return end
-                        if active ~= w then
-                            reveal(w)
-                        elseif w.page and not w.page.Visible then
-                            paint(w, true)
-                        end
-                    end
-                    return
-                end
-            end
-            task.wait()
+        local res = revealWhenReady(w, my, timeout)
+        if res == "timeout" and not destroyed then
+            warn("[CrunoUI] ShowTab: 시간 초과 (Env=" .. tostring(Env ~= nil) .. ", Built=" .. tostring(w.Built) .. ")")
         end
-        warn("[CrunoUI] ShowTab: 시간 초과 (Env=" .. tostring(Env ~= nil) .. ", Built=" .. tostring(w.Built) .. ")")
     end)
     return true
 end
