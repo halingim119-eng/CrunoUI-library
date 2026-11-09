@@ -8,23 +8,31 @@ local GuiService = game:GetService("GuiService")
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local MarketplaceService = game:GetService("MarketplaceService")
+local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local lp = Players.LocalPlayer
 
 local WHITE = Color3.new(1, 1, 1)
 
--- 스레드 권한 올리기 (지원하는 익스큐터만)
+-- 스레드 권한 (지원하는 익스큐터만)
 local setIdentity = setthreadidentity or set_thread_identity or setidentity
     or (syn and syn.set_thread_identity)
+local getIdentity = getthreadidentity or get_thread_identity or getidentity
+    or (syn and syn.get_thread_identity)
 local function elevate()
     if not setIdentity then return end
     if not pcall(setIdentity, 8) then pcall(setIdentity, 7) end
 end
+local function identityStr()
+    if not getIdentity then return "n/a" end
+    local ok, v = pcall(getIdentity)
+    return ok and tostring(v) or "err"
+end
 elevate()
 
 local Lib = {
-    Version = "1.2.1",
+    Version = "1.2.3",
     Flags = {},
     ConfigFolder = "CrunoUI",
     PickerYOffset = 0,
@@ -63,24 +71,29 @@ local function bind(sig, fn)
     return c
 end
 
--- pcall로 보호: 권한 부족 등으로 접근이 막혀도 에러 대신 nil 반환
+-- 에러 안 나게 보호: 멤버 접근 자체를 pcall 안에서 수행.
+-- CoreGui 접근이 막히면 권한을 올리고 한 번 재시도.
 local function follow(root, ...)
     local node = root
     for _, name in ipairs({...}) do
         if not node then return nil end
-        local ok, nxt = pcall(node.FindFirstChild, node, name)
+        local cur = node
+        local ok, nxt = pcall(function() return cur:FindFirstChild(name) end)
+        if not ok and cur == CoreGui then
+            elevate()
+            ok, nxt = pcall(function() return cur:FindFirstChild(name) end)
+        end
         if not ok then return nil end
         node = nxt
-        if not node then return nil end
     end
     return node
 end
 
 local function getRefs()
     local shield = follow(CoreGui, "RobloxGui", "SettingsClippingShield", "SettingsShield")
-    local window = shield and shield:FindFirstChild("MenuContainer")
+    local window = shield and follow(shield, "MenuContainer")
     local tabBar = follow(window, "Page", "HubBar", "TabHeaderContainer", "HubBarContainer")
-    local tabButton = tabBar and tabBar:FindFirstChild("GameSettingsTab")
+    local tabButton = tabBar and follow(tabBar, "GameSettingsTab")
     local content = follow(window, "Page", "PageViewClipper")
     return window, tabBar, tabButton, content
 end
@@ -523,7 +536,14 @@ end
 
 local function sampleRow()
     local e = Env
-    for _, d in ipairs(CoreGui:GetDescendants()) do
+    local root = follow(CoreGui, "RobloxGui") or CoreGui
+    local ok, list = pcall(function() return root:GetDescendants() end)
+    if not ok then
+        elevate()
+        ok, list = pcall(function() return root:GetDescendants() end)
+    end
+    if not ok then return nil end
+    for _, d in ipairs(list) do
         if isText(d) and (d.Text == lp.DisplayName or d.Text == "@" .. lp.Name) and not isCustom(d) then
             local n = d.Parent
             while n and n ~= CoreGui do
@@ -1564,175 +1584,176 @@ local function findWindow(x)
     end
 end
 
--- ===== ShowTab (v1.2.1) =====
+-- ===== ShowTab (v1.2.3) =====
+-- 새 스레드 / require / 대기(yield) 없이, Heartbeat 콜백에서 상태머신으로 진행한다.
+-- CoreGui를 읽는 곳은 전부 pcall로 보호하고, 읽기가 막히면 GuiService.MenuIsOpen으로 대신 판단한다.
+
 local function getShield()
     return follow(CoreGui, "RobloxGui", "SettingsClippingShield", "SettingsShield")
 end
 
--- MenuContainer가 실제로 화면 안에 있는지 (닫힌 상태에서는 화면 위쪽 밖에 있음)
-local function geometryOk()
-    local shield = getShield()
-    local window = shield and follow(shield, "MenuContainer")
-    if not window then return false, nil end
-    local ok, ap, as = pcall(function() return window.AbsolutePosition, window.AbsoluteSize end)
-    if not ok then return false, nil end
-    return (as.X > 0 and as.Y > 0 and ap.Y + as.Y > 0), shield
-end
-
--- 엄격: 화면에 실제로 떠 있을 때만 true
-local function isOpen()
-    local ok, shield = geometryOk()
-    return (ok and shield.Visible) and true or false
-end
-
--- 느슨: 엔진 플래그가 켜져 있으면 Visible 값이 이상해도 열린 것으로 취급
-local function looseOpen()
-    local ok, shield = geometryOk()
-    return (ok and (shield.Visible or GuiService.MenuIsOpen)) and true or false
-end
-
-local function waitFor(fn, t)
-    local t0 = os.clock()
-    while os.clock() - t0 < t do
-        if fn() then return true end
-        task.wait()
-    end
-    return fn()
-end
-
--- 1순위: Roblox 설정 허브 모듈을 직접 호출 (이미 로드된 모듈만 사용)
-local function tryHub()
-    local ok, err = pcall(function()
-        if not getShield() then error("shield-missing", 0) end
-        local mod = follow(CoreGui, "RobloxGui", "Modules", "Settings", "SettingsHub")
-        if not mod then error("module-missing", 0) end
-        local hub = require(mod)
-        if type(hub) ~= "table" or type(hub.SetVisibility) ~= "function" then error("bad-module", 0) end
-        hub:SetVisibility(true)
+-- 설정창 상태 읽기. 반환: 읽기성공, 화면 안에 있음, shield.Visible
+local function readMenu()
+    local ok, onScreen, vis = pcall(function()
+        local shield = getShield()
+        if not shield then return nil end
+        local window = follow(shield, "MenuContainer")
+        if not window then return nil end
+        local ap, as = window.AbsolutePosition, window.AbsoluteSize
+        return (as.X > 0 and as.Y > 0 and ap.Y + as.Y > 0), shield.Visible
     end)
-    if ok then return "ok" end
-    return "err:" .. tostring(err):sub(1, 50)
+    if not ok or onScreen == nil then return false end
+    return true, onScreen, vis
 end
 
--- 2순위: ESC 키 입력
+-- 느슨: 화면 안에 있고 (Visible 이거나 엔진 플래그가 켜져 있음). 못 읽으면 엔진 플래그만 신뢰
+local function menuOpenLoose()
+    local readable, onScreen, vis = readMenu()
+    if readable then return (onScreen and (vis or GuiService.MenuIsOpen)) and true or false end
+    return GuiService.MenuIsOpen and true or false
+end
+
+-- 엄격: 화면 안에 있고 Visible
+local function menuOpenStrict()
+    local readable, onScreen, vis = readMenu()
+    if readable then return (onScreen and vis) and true or false end
+    return GuiService.MenuIsOpen and true or false
+end
+
+-- ESC 키 입력 (CoreGui를 건드리지 않음)
 local function pressEscape()
-    local ok = pcall(function()
-        local vim = game:GetService("VirtualInputManager")
-        vim:SendKeyEvent(true, Enum.KeyCode.Escape, false, game)
-        task.wait(0.05)
-        vim:SendKeyEvent(false, Enum.KeyCode.Escape, false, game)
-    end)
-    if ok then return "vim" end
-    if keypress and keyrelease then
-        if pcall(function()
-            keypress(0x1B)
+    local vimOk, vim = pcall(function() return game:GetService("VirtualInputManager") end)
+    if vimOk and vim then
+        task.spawn(function()
+            pcall(function() vim:SendKeyEvent(true, Enum.KeyCode.Escape, false, game) end)
             task.wait(0.05)
-            keyrelease(0x1B)
-        end) then return "keypress" end
+            pcall(function() vim:SendKeyEvent(false, Enum.KeyCode.Escape, false, game) end)
+        end)
+        return "vim"
+    end
+    if keypress and keyrelease then
+        task.spawn(function()
+            pcall(keypress, 0x1B)
+            task.wait(0.05)
+            pcall(keyrelease, 0x1B)
+        end)
+        return "keypress"
     end
     return nil
 end
 
--- 설정창 열기. 반환: 열렸는지, 시도 내역(진단용)
-local function openMenu()
-    local rep = {}
-    if looseOpen() then return true, rep end
-
-    -- 0) 엔진 플래그만 켜지고 UI는 닫혀 있는 불일치 상태면 초기화
-    if GuiService.MenuIsOpen then
-        if waitFor(looseOpen, 0.35) then return true, rep end
-        pcall(function() GuiService:SetMenuIsOpen(false) end)
-        task.wait(0.2)
-        rep[#rep + 1] = "flag-reset"
-    end
-
-    -- 1) SettingsHub 직접 호출
-    local r = tryHub()
-    rep[#rep + 1] = "hub=" .. r
-    if r == "ok" and waitFor(looseOpen, 1) then return true, rep end
-
-    -- 2) ESC 키 (최대 2번. 이미 열렸으면 다시 누르지 않음)
-    for i = 1, 2 do
-        if looseOpen() then return true, rep end
-        local how = pressEscape()
-        rep[#rep + 1] = "esc" .. i .. "=" .. tostring(how)
-        if not how then break end
-        if waitFor(looseOpen, 1.2) then return true, rep end
-    end
-
-    -- 3) 마지막 수단: 엔진 API (플래그만 바뀌고 UI는 안 뜨는 경우가 많아서 실제 UI로 검증)
-    pcall(function() GuiService:SetMenuIsOpen(true) end)
-    if waitFor(isOpen, 0.6) then
-        rep[#rep + 1] = "api=ok"
-        return true, rep
-    end
-    rep[#rep + 1] = "api=flag-only(" .. tostring(GuiService.MenuIsOpen) .. ")"
-    if GuiService.MenuIsOpen then pcall(function() GuiService:SetMenuIsOpen(false) end) end
-    return false, rep
-end
-
 local showToken = 0
-local pendingShow = nil
+local show = nil
+local lastErr, lastErrT = nil, 0
 
--- 메뉴가 열려 있고 레이아웃이 준비되면 탭을 띄우고 잠시 유지
--- 반환: "ok" / "closed" / "cancelled" / "timeout"
-local function revealWhenReady(w, my, timeout)
-    local t0 = os.clock()
-    while not destroyed and os.clock() - t0 < timeout do
-        if showToken ~= my then return "cancelled" end
-        if looseOpen() then
-            pump()
-            local e = Env
-            if w.Built and e and e.menuPanel.AbsoluteSize.Y > 0 and e.container.AbsoluteSize.Y > 0 then
-                reveal(w)
-                -- 열림 애니메이션/기본 탭 전환이 끝날 때까지 유지
-                local t1 = os.clock()
-                while not destroyed and os.clock() - t1 < 1.2 do
-                    task.wait()
-                    if showToken ~= my then return "cancelled" end
-                    if not looseOpen() then return "closed" end
-                    if active ~= w then
-                        reveal(w)
-                    elseif w.page and not w.page.Visible then
-                        paint(w, true)
-                    end
-                end
-                return "ok"
+local function stepShow(req, now)
+    local w = req.w
+    local open = menuOpenLoose()
+
+    if req.phase ~= "hold" and now > req.deadline then
+        warn("[CrunoUI] ShowTab: 시간 초과 [" .. table.concat(req.log, ", ") .. "] open=" .. tostring(open)
+            .. " Env=" .. tostring(Env ~= nil) .. " Built=" .. tostring(w.Built)
+            .. " identity=" .. identityStr())
+        show = nil
+        return
+    end
+
+    if req.phase == "open" then
+        if open then
+            req.phase = "reveal"
+            req.deadline = now + 6
+            return
+        end
+        if req.attempt >= 5 then return end -- 자동으로 못 열었음: 사용자가 직접 열 때까지 대기
+
+        if req.attempt == 0 then
+            if GuiService.MenuIsOpen then
+                -- 엔진 플래그만 켜지고 UI는 닫힌 불일치 상태 → 잠깐 지켜보고 초기화
+                req.flagSeen = req.flagSeen or now
+                if now - req.flagSeen < 0.4 then return end
+                pcall(function() GuiService:SetMenuIsOpen(false) end)
+                req.log[#req.log + 1] = "flag-reset"
+                req.attempt = 1
+                req.nextAt = now + 0.25
+            else
+                req.attempt = 1
+                req.nextAt = now
             end
+            return
         end
-        task.wait()
+
+        if now < req.nextAt then return end
+
+        if req.attempt == 1 or req.attempt == 2 then
+            if req.attempt == 2 and GuiService.MenuIsOpen then
+                req.attempt = 3 -- 이미 켜져 있는데 ESC를 또 누르면 닫히므로 건너뜀
+                return
+            end
+            local how = pressEscape()
+            req.log[#req.log + 1] = "esc" .. req.attempt .. "=" .. tostring(how)
+            if how then
+                req.attempt += 1
+                req.nextAt = now + 1.2
+            else
+                req.attempt = 3
+            end
+        elseif req.attempt == 3 then
+            pcall(function() GuiService:SetMenuIsOpen(true) end)
+            req.log[#req.log + 1] = "api"
+            req.attempt = 4
+            req.nextAt = now + 0.8
+        elseif req.attempt == 4 then
+            if GuiService.MenuIsOpen and not menuOpenStrict() then
+                pcall(function() GuiService:SetMenuIsOpen(false) end)
+            end
+            req.log[#req.log + 1] = "flag=" .. tostring(GuiService.MenuIsOpen)
+            req.attempt = 5
+            req.deadline = req.t0 + 60
+            warn("[CrunoUI] ShowTab: 설정창을 자동으로 열지 못함 [" .. table.concat(req.log, ", ")
+                .. "] identity=" .. identityStr()
+                .. " - ESC로 직접 열면 '" .. w.Name .. "' 탭이 자동으로 선택됩니다.")
+        end
+
+    elseif req.phase == "reveal" then
+        if not open then return end
+        pump()
+        local e = Env
+        if w.Built and e and e.menuPanel.AbsoluteSize.Y > 0 and e.container.AbsoluteSize.Y > 0 then
+            reveal(w)
+            req.phase = "hold"
+            req.holdUntil = now + 1.2
+        end
+
+    elseif req.phase == "hold" then
+        -- 열림 애니메이션 / 기본 탭 전환이 끝날 때까지 유지
+        if not open then show = nil return end
+        if active ~= w then
+            reveal(w)
+        elseif w.page and not w.page.Visible then
+            paint(w, true)
+        end
+        if now >= req.holdUntil then show = nil end
     end
-    return "timeout"
 end
 
-local function runShow(w, my)
-    local opened, rep = openMenu()
-    if showToken ~= my then return end
-    local timeout = 6
-    if not opened then
-        -- 자동으로 못 열어도, 사용자가 직접 열면 그때 이 탭을 띄움
-        timeout = 60
-        warn("[CrunoUI] ShowTab: 설정창을 자동으로 열지 못함 [" .. table.concat(rep, ", ")
-            .. "] - ESC로 직접 열면 '" .. w.Name .. "' 탭이 자동으로 선택됩니다.")
-    end
-    local res = revealWhenReady(w, my, timeout)
-    if res == "timeout" and not destroyed then
-        warn("[CrunoUI] ShowTab: 시간 초과 (Env=" .. tostring(Env ~= nil) .. ", Built=" .. tostring(w.Built) .. ")")
-    end
-end
-
--- ShowTab 전용 워커: 라이브러리 로드 시점(권한 있는 스레드)에서 만든 스레드가
--- 모든 ShowTab 요청을 처리한다. 호출한 스레드의 권한이 낮아도 CoreGui 접근 가능.
-task.spawn(function()
-    elevate()
-    while not destroyed do
-        local req = pendingShow
-        if req then
-            pendingShow = nil
-            local ok, err = pcall(runShow, req.w, req.token)
-            if not ok then warn("[CrunoUI] ShowTab 오류:", err) end
+bind(RunService.Heartbeat, function()
+    local req = show
+    if not req or destroyed then return end
+    local ok, err = pcall(stepShow, req, os.clock())
+    if not ok then
+        local msg = tostring(err)
+        local t = os.clock()
+        if msg ~= lastErr or t - lastErrT > 3 then
+            lastErr, lastErrT = msg, t
+            warn("[CrunoUI] ShowTab 오류 (phase=" .. tostring(req.phase) .. "):", msg,
+                "identity=" .. identityStr())
         end
-        task.wait(0.05)
+        req.errCount = (req.errCount or 0) + 1
+        if req.errCount > 180 then
+            warn("[CrunoUI] ShowTab: 오류가 계속되어 중단함")
+            if show == req then show = nil end
+        end
+        pcall(elevate)
     end
 end)
 
@@ -1744,8 +1765,18 @@ function Lib.ShowTab(a, b)
         warn("[CrunoUI] ShowTab: 탭을 찾을 수 없음:", tostring(target))
         return false, "tab not found: " .. tostring(target)
     end
-    showToken = showToken + 1
-    pendingShow = {w = w, token = showToken}
+    showToken += 1
+    local now = os.clock()
+    show = {
+        w = w,
+        token = showToken,
+        phase = "open",
+        attempt = 0,
+        nextAt = 0,
+        t0 = now,
+        deadline = now + 8,
+        log = {},
+    }
     return true
 end
 
@@ -1773,7 +1804,7 @@ end
 
 function Lib:Destroy()
     destroyed = true
-    pendingShow = nil
+    show = nil
     pcall(setActive, nil)
     local list = table.clone(Windows)
     table.clear(Windows)
@@ -1786,7 +1817,7 @@ function Lib:Destroy()
     table.clear(conns)
     table.clear(Controls)
     table.clear(Lib.Flags)
-    if env.CrunoUI == Lib then env.CrunoUI = nil end
+    if env.CrunoUI == Lib else nil end
 end
 
 env.CrunoUI = Lib
