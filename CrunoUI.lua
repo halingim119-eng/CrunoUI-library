@@ -15,7 +15,7 @@ local lp = Players.LocalPlayer
 local WHITE = Color3.new(1, 1, 1)
 
 local Lib = {
-    Version = "1.1.1",
+    Version = "1.1.2",
     Flags = {},
     ConfigFolder = "CrunoUI",
     PickerYOffset = 0,
@@ -1550,26 +1550,52 @@ local function findWindow(x)
     end
 end
 
-local function openMenu()
-    if GuiService.MenuIsOpen then return true end
-    pcall(function() GuiService:SetMenuIsOpen(true) end)
-    local t0 = os.clock()
-    while os.clock() - t0 < 0.3 do
-        if GuiService.MenuIsOpen then return true end
-        task.wait()
-    end
+-- ===== ShowTab (fixed) =====
+local function menuVisible()
+    local shield = follow(CoreGui, "RobloxGui", "SettingsClippingShield", "SettingsShield")
+    local window = shield and shield:FindFirstChild("MenuContainer")
+    if not (shield and window) then return false end
+    return shield.Visible and window.Visible and window.AbsoluteSize.Y > 0
+end
+
+local function pressEscape()
     pcall(function()
         local vim = game:GetService("VirtualInputManager")
         vim:SendKeyEvent(true, Enum.KeyCode.Escape, false, game)
         task.wait()
         vim:SendKeyEvent(false, Enum.KeyCode.Escape, false, game)
     end)
-    t0 = os.clock()
-    while os.clock() - t0 < 1 do
-        if GuiService.MenuIsOpen then return true end
+end
+
+local function waitVisible(t)
+    local t0 = os.clock()
+    while os.clock() - t0 < t do
+        if GuiService.MenuIsOpen and menuVisible() then return true end
         task.wait()
     end
-    return GuiService.MenuIsOpen
+    return false
+end
+
+local function openMenu()
+    if GuiService.MenuIsOpen and menuVisible() then return true end
+
+    -- 1) API로 열기
+    if not GuiService.MenuIsOpen then
+        pcall(function() GuiService:SetMenuIsOpen(true) end)
+        if waitVisible(0.5) then return true end
+    end
+
+    -- 2) 상태만 true이고 실제로는 안 보이면: 닫았다가 ESC로 다시 열기
+    if GuiService.MenuIsOpen and not menuVisible() then
+        pcall(function() GuiService:SetMenuIsOpen(false) end)
+        task.wait(0.15)
+    end
+    pressEscape()
+    if waitVisible(1.5) then return true end
+
+    -- 3) 마지막 시도: 한 번 더 ESC
+    pressEscape()
+    return waitVisible(1.5)
 end
 
 function Lib.ShowTab(a, b)
@@ -1592,10 +1618,16 @@ function Lib.ShowTab(a, b)
                 local e = Env
                 if w.Built and e and e.menuPanel.AbsoluteSize.Y > 0 and e.container.AbsoluteSize.Y > 0 then
                     reveal(w)
+                    -- 열림 애니메이션/기본 탭 전환이 끝날 때까지 계속 유지
                     local t1 = os.clock()
-                    while not destroyed and os.clock() - t1 < 0.5 do
+                    while not destroyed and os.clock() - t1 < 1.2 do
                         task.wait()
-                        if GuiService.MenuIsOpen and active ~= w then reveal(w) end
+                        if not GuiService.MenuIsOpen then return end
+                        if active ~= w then
+                            reveal(w)
+                        elseif w.page and not w.page.Visible then
+                            paint(w, true)
+                        end
                     end
                     return
                 end
