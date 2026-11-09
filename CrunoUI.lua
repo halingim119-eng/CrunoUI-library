@@ -14,8 +14,17 @@ local lp = Players.LocalPlayer
 
 local WHITE = Color3.new(1, 1, 1)
 
+-- 스레드 권한 올리기 (지원하는 익스큐터만)
+local setIdentity = setthreadidentity or set_thread_identity or setidentity
+    or (syn and syn.set_thread_identity)
+local function elevate()
+    if not setIdentity then return end
+    if not pcall(setIdentity, 8) then pcall(setIdentity, 7) end
+end
+elevate()
+
 local Lib = {
-    Version = "1.2.0",
+    Version = "1.2.1",
     Flags = {},
     ConfigFolder = "CrunoUI",
     PickerYOffset = 0,
@@ -54,10 +63,14 @@ local function bind(sig, fn)
     return c
 end
 
+-- pcall로 보호: 권한 부족 등으로 접근이 막혀도 에러 대신 nil 반환
 local function follow(root, ...)
     local node = root
     for _, name in ipairs({...}) do
-        node = node and node:FindFirstChild(name)
+        if not node then return nil end
+        local ok, nxt = pcall(node.FindFirstChild, node, name)
+        if not ok then return nil end
+        node = nxt
         if not node then return nil end
     end
     return node
@@ -1501,6 +1514,7 @@ local function startInjector()
     injectorStarted = true
     bind(GuiService.MenuOpened, function() task.defer(pump) end)
     task.spawn(function()
+        elevate()
         local fails = 0
         while not destroyed do
             local allBuilt = Env ~= nil
@@ -1550,7 +1564,7 @@ local function findWindow(x)
     end
 end
 
--- ===== ShowTab (v1.2.0) =====
+-- ===== ShowTab (v1.2.1) =====
 local function getShield()
     return follow(CoreGui, "RobloxGui", "SettingsClippingShield", "SettingsShield")
 end
@@ -1558,9 +1572,10 @@ end
 -- MenuContainer가 실제로 화면 안에 있는지 (닫힌 상태에서는 화면 위쪽 밖에 있음)
 local function geometryOk()
     local shield = getShield()
-    local window = shield and shield:FindFirstChild("MenuContainer")
+    local window = shield and follow(shield, "MenuContainer")
     if not window then return false, nil end
-    local ap, as = window.AbsolutePosition, window.AbsoluteSize
+    local ok, ap, as = pcall(function() return window.AbsolutePosition, window.AbsoluteSize end)
+    if not ok then return false, nil end
     return (as.X > 0 and as.Y > 0 and ap.Y + as.Y > 0), shield
 end
 
@@ -1657,6 +1672,7 @@ local function openMenu()
 end
 
 local showToken = 0
+local pendingShow = nil
 
 -- 메뉴가 열려 있고 레이아웃이 준비되면 탭을 띄우고 잠시 유지
 -- 반환: "ok" / "closed" / "cancelled" / "timeout"
@@ -1689,6 +1705,37 @@ local function revealWhenReady(w, my, timeout)
     return "timeout"
 end
 
+local function runShow(w, my)
+    local opened, rep = openMenu()
+    if showToken ~= my then return end
+    local timeout = 6
+    if not opened then
+        -- 자동으로 못 열어도, 사용자가 직접 열면 그때 이 탭을 띄움
+        timeout = 60
+        warn("[CrunoUI] ShowTab: 설정창을 자동으로 열지 못함 [" .. table.concat(rep, ", ")
+            .. "] - ESC로 직접 열면 '" .. w.Name .. "' 탭이 자동으로 선택됩니다.")
+    end
+    local res = revealWhenReady(w, my, timeout)
+    if res == "timeout" and not destroyed then
+        warn("[CrunoUI] ShowTab: 시간 초과 (Env=" .. tostring(Env ~= nil) .. ", Built=" .. tostring(w.Built) .. ")")
+    end
+end
+
+-- ShowTab 전용 워커: 라이브러리 로드 시점(권한 있는 스레드)에서 만든 스레드가
+-- 모든 ShowTab 요청을 처리한다. 호출한 스레드의 권한이 낮아도 CoreGui 접근 가능.
+task.spawn(function()
+    elevate()
+    while not destroyed do
+        local req = pendingShow
+        if req then
+            pendingShow = nil
+            local ok, err = pcall(runShow, req.w, req.token)
+            if not ok then warn("[CrunoUI] ShowTab 오류:", err) end
+        end
+        task.wait(0.05)
+    end
+end)
+
 function Lib.ShowTab(a, b)
     local target = a
     if a == Lib then target = b end
@@ -1698,22 +1745,7 @@ function Lib.ShowTab(a, b)
         return false, "tab not found: " .. tostring(target)
     end
     showToken = showToken + 1
-    local my = showToken
-    task.spawn(function()
-        local opened, rep = openMenu()
-        if showToken ~= my then return end
-        local timeout = 6
-        if not opened then
-            -- 자동으로 못 열어도, 사용자가 직접 열면 그때 이 탭을 띄움
-            timeout = 60
-            warn("[CrunoUI] ShowTab: 설정창을 자동으로 열지 못함 [" .. table.concat(rep, ", ")
-                .. "] - ESC로 직접 열면 '" .. w.Name .. "' 탭이 자동으로 선택됩니다.")
-        end
-        local res = revealWhenReady(w, my, timeout)
-        if res == "timeout" and not destroyed then
-            warn("[CrunoUI] ShowTab: 시간 초과 (Env=" .. tostring(Env ~= nil) .. ", Built=" .. tostring(w.Built) .. ")")
-        end
-    end)
+    pendingShow = {w = w, token = showToken}
     return true
 end
 
@@ -1741,6 +1773,7 @@ end
 
 function Lib:Destroy()
     destroyed = true
+    pendingShow = nil
     pcall(setActive, nil)
     local list = table.clone(Windows)
     table.clear(Windows)
