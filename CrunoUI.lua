@@ -32,7 +32,7 @@ end
 elevate()
 
 local Lib = {
-    Version = "1.2.5",
+    Version = "1.2.6",
     Flags = {},
     ConfigFolder = "CrunoUI",
     PickerYOffset = 0,
@@ -1584,10 +1584,11 @@ local function findWindow(x)
     end
 end
 
--- ===== ShowTab (v1.2.5) =====
+-- ===== ShowTab (v1.2.6) =====
 -- 새 스레드 / require / 대기(yield) 없이, Heartbeat 콜백에서 상태머신으로 진행한다.
 -- CoreGui를 읽는 곳은 전부 pcall로 보호하고, 읽기가 막히면 GuiService.MenuIsOpen으로 대신 판단한다.
--- v1.2.5: 가상 ESC 때문에 게임이 PC로 인식해 모바일 버튼이 사라지는 문제 → 끝난 뒤 터치로 되돌림.
+-- 가상 ESC 때문에 게임이 PC로 인식해 모바일 버튼이 사라지는 문제 → 끝난 뒤 터치로 되돌림.
+-- v1.2.6: LastInputType은 속성이 아니라 GetLastInputType() 함수라서 수정.
 
 local function getShield()
     return follow(CoreGui, "RobloxGui", "SettingsClippingShield", "SettingsShield")
@@ -1661,23 +1662,6 @@ end
 local function restoreTouch()
     if destroyed then return end
     if lastInput() == Enum.UserInputType.Touch then return end
-    local fired = false
-    if firesignal then
-        fired = pcall(firesignal, UserInputService.LastInputTypeChanged, Enum.UserInputType.Touch)
-    end
-    if not fired and getconnections then
-        pcall(function()
-            for _, c in ipairs(getconnections(UserInputService.LastInputTypeChanged)) do
-                pcall(function() c:Fire(Enum.UserInputType.Touch) end)
-            end
-        end)
-    end
-end
--- 입력 장치를 터치로 되돌려서 게임의 모바일 버튼이 다시 보이게 함.
--- 게임/컨트롤 모듈은 LastInputTypeChanged 신호로 터치 UI를 켜고 끈다.
-local function restoreTouch()
-    if destroyed then return end
-    if UserInputService.LastInputType == Enum.UserInputType.Touch then return end
     local fired = false
     if firesignal then
         fired = pcall(firesignal, UserInputService.LastInputTypeChanged, Enum.UserInputType.Touch)
