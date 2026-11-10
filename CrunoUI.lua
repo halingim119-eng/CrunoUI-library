@@ -32,7 +32,7 @@ end
 elevate()
 
 local Lib = {
-    Version = "1.2.6",
+    Version = "1.2.7",
     Flags = {},
     ConfigFolder = "CrunoUI",
     PickerYOffset = 0,
@@ -1584,11 +1584,12 @@ local function findWindow(x)
     end
 end
 
--- ===== ShowTab (v1.2.6) =====
+-- ===== ShowTab (v1.2.7) =====
 -- 새 스레드 / require / 대기(yield) 없이, Heartbeat 콜백에서 상태머신으로 진행한다.
 -- CoreGui를 읽는 곳은 전부 pcall로 보호하고, 읽기가 막히면 GuiService.MenuIsOpen으로 대신 판단한다.
--- 가상 ESC 때문에 게임이 PC로 인식해 모바일 버튼이 사라지는 문제 → 끝난 뒤 터치로 되돌림.
--- v1.2.6: LastInputType은 속성이 아니라 GetLastInputType() 함수라서 수정.
+-- 가상 ESC 때문에 게임이 PC로 인식해 모바일 버튼이 사라지는 문제:
+--   (1) 원래 모바일이면 GetLastInputType()이 계속 Touch를 돌려주도록 후킹 (게임 스크립트 호출에만 적용)
+--   (2) LastInputTypeChanged 신호에 Touch를 보내서 컨트롤을 다시 켬
 
 local function getShield()
     return follow(CoreGui, "RobloxGui", "SettingsClippingShield", "SettingsShield")
@@ -1644,7 +1645,7 @@ local function pressEscape()
     return nil
 end
 
--- 마지막 입력 장치 (속성이 아니라 함수)
+-- 마지막 입력 장치 (속성이 아니라 함수). 라이브러리 내부 호출이라 후킹의 영향을 받지 않음
 local function lastInput()
     local ok, t = pcall(function() return UserInputService:GetLastInputType() end)
     if ok then return t end
@@ -1657,11 +1658,32 @@ local function isTouchDevice()
     return UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 end
 
+-- GetLastInputType 후킹: spoof.on 일 때 게임 스크립트가 부르면 Touch를 돌려줌.
+-- 다시 실행해도 후킹이 겹치지 않도록 env에 한 번만 설치
+local spoof = env.CrunoSpoof
+if not spoof then
+    spoof = {on = false, hooked = false}
+    env.CrunoSpoof = spoof
+    if hookmetamethod and getnamecallmethod and newcclosure then
+        local old
+        local ok = pcall(function()
+            old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+                if spoof.on and self == UserInputService
+                    and getnamecallmethod() == "GetLastInputType"
+                    and not (checkcaller and checkcaller()) then
+                    return Enum.UserInputType.Touch
+                end
+                return old(self, ...)
+            end))
+        end)
+        spoof.hooked = ok and old ~= nil
+    end
+end
+
 -- 입력 장치를 터치로 되돌려서 게임의 모바일 버튼이 다시 보이게 함.
 -- 게임/컨트롤 모듈은 LastInputTypeChanged 신호로 터치 UI를 켜고 끈다.
 local function restoreTouch()
     if destroyed then return end
-    if lastInput() == Enum.UserInputType.Touch then return end
     local fired = false
     if firesignal then
         fired = pcall(firesignal, UserInputService.LastInputTypeChanged, Enum.UserInputType.Touch)
@@ -1678,10 +1700,15 @@ end
 -- 입력 처리가 늦게 반영될 수 있어서 몇 번에 나눠서 시도
 local function scheduleRestore(wasTouch)
     if not wasTouch then return end
-    for _, t in ipairs({0.15, 0.5, 1.0, 1.8}) do
+    for _, t in ipairs({0.1, 0.4, 0.9, 1.6, 3}) do
         task.delay(t, restoreTouch)
     end
 end
+
+-- 설정창을 닫을 때도 입력 장치가 바뀔 수 있으니 한 번 더
+bind(GuiService.MenuClosed, function()
+    if spoof.on then scheduleRestore(true) end
+end)
 
 local showToken = 0
 local show = nil
@@ -1814,6 +1841,8 @@ function Lib.ShowTab(a, b)
     end
     showToken += 1
     local now = os.clock()
+    local wasTouch = isTouchDevice()
+    if wasTouch then spoof.on = true end -- 원래 모바일이면 게임에는 계속 터치로 보이게 함
     show = {
         w = w,
         token = showToken,
@@ -1823,7 +1852,7 @@ function Lib.ShowTab(a, b)
         t0 = now,
         deadline = now + 8,
         log = {},
-        wasTouch = isTouchDevice(),
+        wasTouch = wasTouch,
     }
     return true
 end
@@ -1853,6 +1882,7 @@ end
 function Lib:Destroy()
     destroyed = true
     show = nil
+    spoof.on = false
     pcall(setActive, nil)
     local list = table.clone(Windows)
     table.clear(Windows)
