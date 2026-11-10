@@ -32,7 +32,7 @@ end
 elevate()
 
 local Lib = {
-    Version = "1.2.8",
+    Version = "1.2.9",
     Flags = {},
     ConfigFolder = "CrunoUI",
     PickerYOffset = 0,
@@ -1584,17 +1584,16 @@ local function findWindow(x)
     end
 end
 
--- ===== ShowTab (v1.2.8) =====
+-- ===== ShowTab (v1.2.9) =====
 -- 새 스레드 / require / 대기(yield) 없이, Heartbeat 콜백에서 상태머신으로 진행한다.
 -- CoreGui를 읽는 곳은 전부 pcall로 보호하고, 읽기가 막히면 GuiService.MenuIsOpen으로 대신 판단한다.
--- 가상 ESC 때문에 게임이 PC로 인식해 모바일 버튼이 사라지는 문제 (v1.2.8 수정):
---   (1) 모바일이면 ESC(키보드 입력)를 보내기 전에 GuiService:SetMenuIsOpen(true)로 먼저 열어봄
---       → 성공하면 키보드 입력이 아예 발생하지 않음
---   (2) ESC를 보내야 할 때는 그 순간만 LastInputTypeChanged 연결을 잠깐 꺼서
+-- 설정창은 가상 ESC로만 연다 (SetMenuIsOpen API는 값만 바꾸고 창을 열지 않으므로 사용하지 않음).
+-- 가상 ESC 때문에 게임이 PC로 인식해 모바일 버튼이 사라지는 문제 (v1.2.8 ~ 수정):
+--   (1) ESC를 보내는 순간만 LastInputTypeChanged 연결을 잠깐 꺼서
 --       게임이 Keyboard 변경을 못 보게 하고, 끝나면 다시 켜고 Touch를 보냄
---   (3) 원래 모바일이면 GetLastInputType()이 계속 Touch를 돌려주도록 후킹
+--   (2) 원래 모바일이면 GetLastInputType()이 계속 Touch를 돌려주도록 후킹
 --       (__namecall + hookfunction: 점 호출 방식도 커버, 게임 스크립트 호출에만 적용)
---   (4) LastInputTypeChanged 신호에 Touch를 보내서 컨트롤을 다시 켬
+--   (3) LastInputTypeChanged 신호에 Touch를 보내서 컨트롤을 다시 켬
 
 local function getShield()
     return follow(CoreGui, "RobloxGui", "SettingsClippingShield", "SettingsShield")
@@ -1618,13 +1617,6 @@ end
 local function menuOpenLoose()
     local readable, onScreen, vis = readMenu()
     if readable then return (onScreen and (vis or GuiService.MenuIsOpen)) and true or false end
-    return GuiService.MenuIsOpen and true or false
-end
-
--- 엄격: 화면 안에 있고 Visible
-local function menuOpenStrict()
-    local readable, onScreen, vis = readMenu()
-    if readable then return (onScreen and vis) and true or false end
     return GuiService.MenuIsOpen and true or false
 end
 
@@ -1788,40 +1780,14 @@ local function stepShow(req, now)
         end
         if req.attempt >= 5 then return end -- 자동으로 못 열었음: 사용자가 직접 열 때까지 대기
 
-        -- 모바일: ESC(키보드 입력)를 보내면 입력 장치가 Keyboard로 바뀌므로
-        -- 먼저 API로 열어봄. 성공하면 키보드 입력이 아예 생기지 않음
-        if req.wasTouch and req.attempt == 0 and not req.apiDone then
-            if not req.apiAt then
-                req.apiAt = now
-                if not GuiService.MenuIsOpen then
-                    pcall(function() GuiService:SetMenuIsOpen(true) end)
-                end
-                req.log[#req.log + 1] = "api-first"
-                return
-            end
-            if now - req.apiAt < 0.9 then return end -- 열리면 위의 open 검사에서 처리됨
-            req.apiDone = true
-            if GuiService.MenuIsOpen and not menuOpenStrict() then
-                -- 플래그만 켜지고 UI는 안 열린 상태 → 초기화하고 ESC 방식으로 넘어감
-                pcall(function() GuiService:SetMenuIsOpen(false) end)
-                req.log[#req.log + 1] = "api-first-failed"
-            end
-            return
-        end
-
         if req.attempt == 0 then
             if GuiService.MenuIsOpen then
-                -- 엔진 플래그만 켜지고 UI는 닫힌 불일치 상태 → 잠깐 지켜보고 초기화
+                -- 엔진 플래그는 켜졌는데 UI가 아직 안 보임 (열리는 중일 수 있음) → ESC로 닫아버리지 않게 잠깐 기다림
                 req.flagSeen = req.flagSeen or now
                 if now - req.flagSeen < 0.4 then return end
-                pcall(function() GuiService:SetMenuIsOpen(false) end)
-                req.log[#req.log + 1] = "flag-reset"
-                req.attempt = 1
-                req.nextAt = now + 0.25
-            else
-                req.attempt = 1
-                req.nextAt = now
             end
+            req.attempt = 1
+            req.nextAt = now
             return
         end
 
@@ -1843,14 +1809,6 @@ local function stepShow(req, now)
                 req.attempt = 3
             end
         elseif req.attempt == 3 then
-            pcall(function() GuiService:SetMenuIsOpen(true) end)
-            req.log[#req.log + 1] = "api"
-            req.attempt = 4
-            req.nextAt = now + 0.8
-        elseif req.attempt == 4 then
-            if GuiService.MenuIsOpen and not menuOpenStrict() then
-                pcall(function() GuiService:SetMenuIsOpen(false) end)
-            end
             req.log[#req.log + 1] = "flag=" .. tostring(GuiService.MenuIsOpen)
             req.attempt = 5
             req.deadline = req.t0 + 60
