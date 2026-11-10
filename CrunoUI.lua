@@ -1643,12 +1643,36 @@ local function pressEscape()
     return nil
 end
 
+-- 마지막 입력 장치 (속성이 아니라 함수)
+local function lastInput()
+    local ok, t = pcall(function() return UserInputService:GetLastInputType() end)
+    if ok then return t end
+    return nil
+end
+
 -- 원래 모바일(터치)이었는지 판단
 local function isTouchDevice()
-    if UserInputService.LastInputType == Enum.UserInputType.Touch then return true end
+    if lastInput() == Enum.UserInputType.Touch then return true end
     return UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 end
 
+-- 입력 장치를 터치로 되돌려서 게임의 모바일 버튼이 다시 보이게 함.
+-- 게임/컨트롤 모듈은 LastInputTypeChanged 신호로 터치 UI를 켜고 끈다.
+local function restoreTouch()
+    if destroyed then return end
+    if lastInput() == Enum.UserInputType.Touch then return end
+    local fired = false
+    if firesignal then
+        fired = pcall(firesignal, UserInputService.LastInputTypeChanged, Enum.UserInputType.Touch)
+    end
+    if not fired and getconnections then
+        pcall(function()
+            for _, c in ipairs(getconnections(UserInputService.LastInputTypeChanged)) do
+                pcall(function() c:Fire(Enum.UserInputType.Touch) end)
+            end
+        end)
+    end
+end
 -- 입력 장치를 터치로 되돌려서 게임의 모바일 버튼이 다시 보이게 함.
 -- 게임/컨트롤 모듈은 LastInputTypeChanged 신호로 터치 UI를 켜고 끈다.
 local function restoreTouch()
