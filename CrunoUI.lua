@@ -32,7 +32,7 @@ end
 elevate()
 
 local Lib = {
-    Version = "1.2.7",
+    Version = "1.2.8",
     Flags = {},
     ConfigFolder = "CrunoUI",
     PickerYOffset = 0,
@@ -1584,12 +1584,17 @@ local function findWindow(x)
     end
 end
 
--- ===== ShowTab (v1.2.7) =====
+-- ===== ShowTab (v1.2.8) =====
 -- 새 스레드 / require / 대기(yield) 없이, Heartbeat 콜백에서 상태머신으로 진행한다.
 -- CoreGui를 읽는 곳은 전부 pcall로 보호하고, 읽기가 막히면 GuiService.MenuIsOpen으로 대신 판단한다.
--- 가상 ESC 때문에 게임이 PC로 인식해 모바일 버튼이 사라지는 문제:
---   (1) 원래 모바일이면 GetLastInputType()이 계속 Touch를 돌려주도록 후킹 (게임 스크립트 호출에만 적용)
---   (2) LastInputTypeChanged 신호에 Touch를 보내서 컨트롤을 다시 켬
+-- 가상 ESC 때문에 게임이 PC로 인식해 모바일 버튼이 사라지는 문제 (v1.2.8 수정):
+--   (1) 모바일이면 ESC(키보드 입력)를 보내기 전에 GuiService:SetMenuIsOpen(true)로 먼저 열어봄
+--       → 성공하면 키보드 입력이 아예 발생하지 않음
+--   (2) ESC를 보내야 할 때는 그 순간만 LastInputTypeChanged 연결을 잠깐 꺼서
+--       게임이 Keyboard 변경을 못 보게 하고, 끝나면 다시 켜고 Touch를 보냄
+--   (3) 원래 모바일이면 GetLastInputType()이 계속 Touch를 돌려주도록 후킹
+--       (__namecall + hookfunction: 점 호출 방식도 커버, 게임 스크립트 호출에만 적용)
+--   (4) LastInputTypeChanged 신호에 Touch를 보내서 컨트롤을 다시 켬
 
 local function getShield()
     return follow(CoreGui, "RobloxGui", "SettingsClippingShield", "SettingsShield")
@@ -1680,6 +1685,23 @@ if not spoof then
     end
 end
 
+-- 점 호출 방식(UserInputService.GetLastInputType(UserInputService))도 막기 위한 함수 후킹.
+-- 이전 버전이 만든 spoof 테이블이 남아 있어도 한 번만 설치되도록 별도 플래그 사용
+if not spoof.fnHooked and hookfunction then
+    local wrap = newcclosure or function(f) return f end
+    local oldFn
+    local ok = pcall(function()
+        oldFn = hookfunction(UserInputService.GetLastInputType, wrap(function(self, ...)
+            if spoof.on and self == UserInputService
+                and not (checkcaller and checkcaller()) then
+                return Enum.UserInputType.Touch
+            end
+            return oldFn(self, ...)
+        end))
+    end)
+    spoof.fnHooked = ok and oldFn ~= nil
+end
+
 -- 입력 장치를 터치로 되돌려서 게임의 모바일 버튼이 다시 보이게 함.
 -- 게임/컨트롤 모듈은 LastInputTypeChanged 신호로 터치 UI를 켜고 끈다.
 local function restoreTouch()
@@ -1703,6 +1725,33 @@ local function scheduleRestore(wasTouch)
     for _, t in ipairs({0.1, 0.4, 0.9, 1.6, 3}) do
         task.delay(t, restoreTouch)
     end
+end
+
+-- 입력 장치 보호: ESC 키 입력 순간에 게임이 Keyboard 변경을 못 보게 함.
+-- LastInputTypeChanged 연결을 잠깐 끄고(Disable), 시간이 지나면 다시 켜고 Touch를 보냄
+local guard = {active = false, conns = {}, untilT = 0}
+
+local function guardOn(duration)
+    guard.untilT = os.clock() + duration
+    if guard.active or not getconnections then return end
+    local ok, list = pcall(getconnections, UserInputService.LastInputTypeChanged)
+    if not ok or type(list) ~= "table" then return end
+    for _, c in ipairs(list) do
+        local okE, enabled = pcall(function() return c.Enabled end)
+        if okE and enabled ~= false and pcall(function() c:Disable() end) then
+            table.insert(guard.conns, c)
+        end
+    end
+    guard.active = #guard.conns > 0
+end
+
+local function guardOff()
+    if not guard.active and #guard.conns == 0 then return end
+    guard.active = false
+    local list = guard.conns
+    guard.conns = {}
+    for _, c in ipairs(list) do pcall(function() c:Enable() end) end
+    scheduleRestore(true)
 end
 
 -- 설정창을 닫을 때도 입력 장치가 바뀔 수 있으니 한 번 더
@@ -1739,6 +1788,27 @@ local function stepShow(req, now)
         end
         if req.attempt >= 5 then return end -- 자동으로 못 열었음: 사용자가 직접 열 때까지 대기
 
+        -- 모바일: ESC(키보드 입력)를 보내면 입력 장치가 Keyboard로 바뀌므로
+        -- 먼저 API로 열어봄. 성공하면 키보드 입력이 아예 생기지 않음
+        if req.wasTouch and req.attempt == 0 and not req.apiDone then
+            if not req.apiAt then
+                req.apiAt = now
+                if not GuiService.MenuIsOpen then
+                    pcall(function() GuiService:SetMenuIsOpen(true) end)
+                end
+                req.log[#req.log + 1] = "api-first"
+                return
+            end
+            if now - req.apiAt < 0.9 then return end -- 열리면 위의 open 검사에서 처리됨
+            req.apiDone = true
+            if GuiService.MenuIsOpen and not menuOpenStrict() then
+                -- 플래그만 켜지고 UI는 안 열린 상태 → 초기화하고 ESC 방식으로 넘어감
+                pcall(function() GuiService:SetMenuIsOpen(false) end)
+                req.log[#req.log + 1] = "api-first-failed"
+            end
+            return
+        end
+
         if req.attempt == 0 then
             if GuiService.MenuIsOpen then
                 -- 엔진 플래그만 켜지고 UI는 닫힌 불일치 상태 → 잠깐 지켜보고 초기화
@@ -1762,6 +1832,7 @@ local function stepShow(req, now)
                 req.attempt = 3 -- 이미 켜져 있는데 ESC를 또 누르면 닫히므로 건너뜀
                 return
             end
+            if req.wasTouch then guardOn(0.8) end -- ESC 키 입력이 게임에 Keyboard 변경으로 보이지 않게 보호
             local how = pressEscape()
             req.log[#req.log + 1] = "esc" .. req.attempt .. "=" .. tostring(how)
             if how then
@@ -1811,6 +1882,9 @@ local function stepShow(req, now)
 end
 
 bind(RunService.Heartbeat, function()
+    -- 입력 보호 시간이 끝나면 연결을 다시 켜고 Touch 복구 (show 상태와 무관하게 항상 확인)
+    if guard.active and os.clock() >= guard.untilT then guardOff() end
+
     local req = show
     if not req or destroyed then return end
     pcall(elevate)
@@ -1841,8 +1915,12 @@ function Lib.ShowTab(a, b)
     end
     showToken += 1
     local now = os.clock()
-    local wasTouch = isTouchDevice()
-    if wasTouch then spoof.on = true end -- 원래 모바일이면 게임에는 계속 터치로 보이게 함
+    -- 한 번이라도 모바일로 판단되면 계속 모바일로 취급 (ESC 직후 입력 장치가 Keyboard로 바뀌어도 유지)
+    local wasTouch = isTouchDevice() or spoof.touch == true
+    if wasTouch then
+        spoof.on = true -- 원래 모바일이면 게임에는 계속 터치로 보이게 함
+        spoof.touch = true
+    end
     show = {
         w = w,
         token = showToken,
@@ -1883,6 +1961,7 @@ function Lib:Destroy()
     destroyed = true
     show = nil
     spoof.on = false
+    pcall(guardOff) -- 꺼둔 LastInputTypeChanged 연결이 남지 않도록 복구
     pcall(setActive, nil)
     local list = table.clone(Windows)
     table.clear(Windows)
