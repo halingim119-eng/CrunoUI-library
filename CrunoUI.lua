@@ -32,8 +32,9 @@ end
 elevate()
 
 local Lib = {
-    Version = "1.3.0",
+    Version = "1.5.0",
     Debug = false, -- true로 바꾸면 ShowTab 진행 로그를 print로 출력
+    -- ForceMobile = true / false : 모바일 판별을 강제로 지정 (기본: 자동 판별)
     Flags = {},
     ConfigFolder = "CrunoUI",
     PickerYOffset = 0,
@@ -649,9 +650,9 @@ local function buildProfile(w, scroll, probe, showIP)
         end
     end)
 
-    -- 플레이어 헤드샷 이미지 대신 user 아이콘 사용
+    -- 플레이어 헤드샷 이미지 대신 user 아이콘 사용 (원 안을 거의 채우도록 크게)
     icon(avatar, {"user", "user-round"}, {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
-        Size = UDim2.fromScale(0.6, 0.6)})
+        Size = UDim2.fromScale(1.04, 1.04)})
 
     icon(thumb, {"gamepad", "gamepad-2"}, {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
         Size = UDim2.fromScale(1.05, 1.05)})
@@ -666,7 +667,7 @@ local function buildProfile(w, scroll, probe, showIP)
         local h = math.max(sampledH and sampledH * 4 or 240, 190)
         topRow.Size = UDim2.new(1, 0, 0, h)
 
-        local a = math.floor(h * 0.7)
+        local a = math.floor(h * 0.8)
         avatar.Size = UDim2.fromOffset(a, a)
         info.Position = UDim2.new(0, a + 32, 0, 10)
         info.Size = UDim2.new(1, -(a + 44), 1, -20)
@@ -1580,19 +1581,23 @@ local function findWindow(x)
     end
 end
 
--- ===== ShowTab (v1.3.0) =====
+-- ===== ShowTab (v1.4.0) =====
 -- 새 스레드 / require / 대기(yield) 없이, Heartbeat 콜백에서 상태머신으로 진행한다.
 -- CoreGui를 읽는 곳은 전부 pcall로 보호하고, 읽기가 막히면 GuiService.MenuIsOpen으로 대신 판단한다.
 -- SetMenuIsOpen API는 값만 바꾸고 창을 열지 않으므로 사용하지 않는다.
 --
--- 가상 ESC(키보드 입력)를 보내면 게임이 PC로 인식해 모바일 버튼이 사라지는 문제 (v1.3.0):
---   (1) 모바일이면 ESC를 아예 보내지 않고, 상단바의 Roblox 메뉴 버튼을 직접 눌러서 연다
---       (버튼의 Activated 신호를 발생시킴 → 키보드 입력이 생기지 않음)
---   (2) 메뉴 버튼을 못 찾거나 안 열리면 ESC로 열되, 그 순간만 LastInputTypeChanged 연결을 잠깐 꺼서
---       게임이 Keyboard 변경을 못 보게 하고, 끝나면 다시 켬
---   (3) ESC를 쓴 경우 엔진의 실제 입력 장치를 되돌리기 위해, 우리 페이지의 빈 곳에 가상 터치를 한 번 보냄
---   (4) GetLastInputType()이 Touch를 돌려주도록 후킹 (__namecall + hookfunction, 게임 스크립트 호출에만 적용)
---   (5) LastInputTypeChanged 신호에 Touch를 보내서 컨트롤을 다시 켬
+-- 가상 ESC(키보드 입력)를 보내면 게임이 PC로 인식해 모바일 버튼이 사라지는 문제의 근본 해결 (v1.4.0):
+--   (1) 모바일 판별: 플랫폼이 Android/IOS이거나 TouchEnabled가 켜져 있으면 모바일 (터치 미지원 PC만 ESC 사용).
+--       에뮬레이터처럼 KeyboardEnabled/MouseEnabled가 켜져 있어도 모바일로 판별한다.
+--       Lib.ForceMobile = true / false 로 직접 지정도 가능.
+--   (2) 모바일이면 ESC를 "처음부터 보내지 않는다". 상단바 Roblox 메뉴 버튼을
+--       실제 가상 터치(좌표 2가지) -> Activated 신호 -> 클릭 신호 순서로 눌러서 연다 (실패하면 1회 재시도).
+--       가상 "터치"는 입력 장치를 Touch로 유지하므로 게임이 PC로 바뀌지 않는다.
+--   (3) 모바일에서는 ESC(키보드 입력)를 어떤 경우에도 보내지 않는다. 위 방법이 모두 실패하면
+--       경고만 출력하고, 사용자가 직접 메뉴를 열면 탭이 자동으로 선택된다. (PC는 기존처럼 ESC 사용)
+--   (4) 엔진의 실제 입력 장치가 Touch가 아니면 우리 페이지의 빈 곳에 가상 터치를 보내 되돌린다.
+--   (5) GetLastInputType()이 Touch를 돌려주도록 후킹 (__namecall + hookfunction, 게임 스크립트 호출에만 적용)
+--   (6) 입력 장치가 이미 Touch면 복구 신호를 보내지 않는다 (불필요한 신호 방지).
 
 local function getShield()
     return follow(CoreGui, "RobloxGui", "SettingsClippingShield", "SettingsShield")
@@ -1686,12 +1691,6 @@ local function lastInput()
     return nil
 end
 
--- 원래 모바일(터치)이었는지 판단
-local function isTouchDevice()
-    if lastInput() == Enum.UserInputType.Touch then return true end
-    return UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
-end
-
 -- GetLastInputType 후킹: spoof.on 일 때 게임 스크립트가 부르면 Touch를 돌려줌.
 -- 다시 실행해도 후킹이 겹치지 않도록 env에 한 번만 설치
 local spoof = env.CrunoSpoof
@@ -1731,10 +1730,79 @@ if not spoof.fnHooked and hookfunction then
     spoof.fnHooked = ok and oldFn ~= nil
 end
 
+-- 실행 기기 종류: "mobile" / "desktop" / nil(알 수 없음)
+local function platformKind()
+    local ok, plat = pcall(function() return UserInputService:GetPlatform() end)
+    if not ok or plat == nil then return nil end
+    local okN, n = pcall(function() return plat.Name end)
+    if not okN then return nil end
+    if n == "Android" or n == "IOS" then return "mobile" end
+    if n == "Windows" or n == "OSX" or n == "UWP" or n == "Linux" then return "desktop" end
+    return nil
+end
+
+-- 모바일(터치) 기기인지 판단. 반환: 모바일 여부, 판단 근거(디버그용)
+local function isTouchDevice()
+    if Lib.ForceMobile ~= nil then return Lib.ForceMobile and true or false, "force" end
+    if spoof.touch then return true, "remembered" end
+    if platformKind() == "mobile" then return true, "platform" end
+    -- 모바일 기기는 항상 TouchEnabled. 키보드/마우스가 켜져 있어도(에뮬레이터 등) 터치 가능하면 모바일로 취급
+    if UserInputService.TouchEnabled then return true, "touchenabled" end
+    if lastInput() == Enum.UserInputType.Touch then return true, "lastinput" end
+    return false, "pc"
+end
+
+local function insetY()
+    local ok, a = pcall(function() return GuiService:GetGuiInset() end)
+    if ok and a then return a.Y end
+    return 0
+end
+
+-- 버튼 중심의 화면 좌표 후보 2개 (ScreenGui의 IgnoreGuiInset에 따라 상단 inset 보정 여부가 갈림)
+local function tapCandidates(obj)
+    local p, s = obj.AbsolutePosition, obj.AbsoluteSize
+    local cx, cy = p.X + s.X / 2, p.Y + s.Y / 2
+    local sg = obj:FindFirstAncestorWhichIsA("ScreenGui")
+    local ins = insetY()
+    local a, b
+    if sg and sg.IgnoreGuiInset then a, b = cy, cy + ins else a, b = cy + ins, cy end
+    return {{cx, a}, {cx, b}}
+end
+
+-- 가상 "터치" 한 번 (키보드/마우스 입력이 아니라서 입력 장치가 Touch로 유지됨)
+local touchSeq = 0
+local function sendTap(x, y)
+    local vimOk, vim = pcall(function() return game:GetService("VirtualInputManager") end)
+    if not vimOk or not vim then return false end
+    touchSeq = touchSeq % 8 + 1
+    local id = 8 + touchSeq
+    local ok = pcall(function() vim:SendTouchEvent(id, 0, x, y) end)
+    task.delay(0.06, function()
+        pcall(function() vim:SendTouchEvent(id, 2, x, y) end)
+    end)
+    return ok
+end
+
+-- 엔진의 "실제" 마지막 입력 장치를 Touch로 되돌리기 위해, 우리 페이지 맨 위 빈 곳(스크롤 패딩 영역)에
+-- 가상 터치를 한 번 보냄. 아무 버튼도 없는 곳이라 동작에는 영향 없음.
+local function tapRestoreTouch()
+    if destroyed or not Env then return end
+    local w = active
+    if not w or not w.page or not w.page.Parent or not w.page.Visible then return end
+    local p, s = w.page.AbsolutePosition, w.page.AbsoluteSize
+    if s.X <= 0 or s.Y <= 0 then return end
+    local inset = 0
+    local sg = w.page:FindFirstAncestorWhichIsA("ScreenGui")
+    if not (sg and sg.IgnoreGuiInset) then inset = insetY() end
+    sendTap(p.X + s.X / 2, p.Y + inset + 3)
+end
+
 -- 입력 장치를 터치로 되돌려서 게임의 모바일 버튼이 다시 보이게 함.
 -- 게임/컨트롤 모듈은 LastInputTypeChanged 신호로 터치 UI를 켜고 끈다.
-local function restoreTouch()
+-- force가 아니면, 엔진 입력 장치가 이미 Touch일 때는 아무것도 하지 않음.
+local function restoreTouch(force)
     if destroyed then return end
+    if not force and lastInput() == Enum.UserInputType.Touch then return end
     local fired = false
     if firesignal then
         fired = pcall(firesignal, UserInputService.LastInputTypeChanged, Enum.UserInputType.Touch)
@@ -1749,34 +1817,16 @@ local function restoreTouch()
 end
 
 -- 입력 처리가 늦게 반영될 수 있어서 몇 번에 나눠서 시도
-local function scheduleRestore(wasTouch)
+local function scheduleRestore(wasTouch, force)
     if not wasTouch then return end
     for _, t in ipairs({0.1, 0.4, 0.9, 1.6, 3}) do
-        task.delay(t, restoreTouch)
+        task.delay(t, function()
+            if destroyed then return end
+            restoreTouch(force)
+            -- 그래도 엔진 입력 장치가 Touch가 아니면 실제 터치를 한 번 보내 되돌림
+            if t >= 0.9 and lastInput() ~= Enum.UserInputType.Touch then tapRestoreTouch() end
+        end)
     end
-end
-
--- 엔진의 "실제" 마지막 입력 장치를 Touch로 되돌리기 위해, 우리 페이지 맨 위 빈 곳(스크롤 패딩 영역)에
--- 가상 터치를 한 번 보냄. 아무 버튼도 없는 곳이라 동작에는 영향 없음.
-local function tapRestoreTouch()
-    if destroyed or not Env then return end
-    local w = active
-    if not w or not w.page or not w.page.Parent or not w.page.Visible then return end
-    local vimOk, vim = pcall(function() return game:GetService("VirtualInputManager") end)
-    if not vimOk or not vim then return end
-    local p, s = w.page.AbsolutePosition, w.page.AbsoluteSize
-    if s.X <= 0 or s.Y <= 0 then return end
-    local inset = 0
-    local sg = w.page:FindFirstAncestorWhichIsA("ScreenGui")
-    if not (sg and sg.IgnoreGuiInset) then
-        local ok, a = pcall(function() return GuiService:GetGuiInset() end)
-        if ok and a then inset = a.Y end
-    end
-    local x, y = p.X + s.X / 2, p.Y + inset + 3
-    pcall(function() vim:SendTouchEvent(9, 0, x, y) end)
-    task.delay(0.05, function()
-        pcall(function() vim:SendTouchEvent(9, 2, x, y) end)
-    end)
 end
 
 -- 입력 장치 보호: ESC 키 입력 순간에 게임이 Keyboard 변경을 못 보게 함.
@@ -1803,11 +1853,11 @@ local function guardOff()
     local list = guard.conns
     guard.conns = {}
     for _, c in ipairs(list) do pcall(function() c:Enable() end) end
-    scheduleRestore(true)
+    scheduleRestore(true, true)
     task.delay(0.15, tapRestoreTouch)
 end
 
--- 설정창을 닫을 때도 입력 장치가 바뀔 수 있으니 한 번 더
+-- 설정창을 닫을 때도 입력 장치가 바뀔 수 있으니 한 번 더 (이미 Touch면 아무 것도 안 함)
 bind(GuiService.MenuClosed, function()
     if spoof.on then scheduleRestore(true) end
 end)
@@ -1819,10 +1869,20 @@ local lastErr, lastErrT = nil, 0
 local function endShow(req)
     if show == req then show = nil end
     if Lib.Debug then
+        req.log[#req.log + 1] = "last=" .. tostring(lastInput())
         print("[CrunoUI] ShowTab log: [" .. table.concat(req.log, ", ") .. "]")
     end
-    scheduleRestore(req.wasTouch)
+    scheduleRestore(req.wasTouch, req.escUsed)
     if req.wasTouch and req.escUsed then task.delay(0.1, tapRestoreTouch) end
+end
+
+-- 메뉴를 여는 단계 (모바일은 키보드 입력 없는 방법을 먼저, ESC는 맨 마지막)
+local STEP_WAIT = {signal = 0.8, tapA = 0.9, tapB = 0.9, click = 0.8, esc = 1.2}
+
+local function buildSteps(wasTouch)
+    -- 모바일: 실제 터치를 먼저, 안 되면 신호, 그래도 안 되면 한 번 더 (ESC는 절대 없음)
+    if wasTouch then return {"tapA", "tapB", "signal", "click", "tapA", "tapB", "signal"} end
+    return {"esc", "esc"}
 end
 
 local function stepShow(req, now)
@@ -1843,68 +1903,90 @@ local function stepShow(req, now)
             req.deadline = now + 6
             return
         end
-        if req.attempt >= 5 then return end -- 자동으로 못 열었음: 사용자가 직접 열 때까지 대기
 
-        if req.attempt == 0 then
-            if GuiService.MenuIsOpen then
-                -- 엔진 플래그는 켜졌는데 UI가 아직 안 보임 (열리는 중일 수 있음) → ESC로 닫아버리지 않게 잠깐 기다림
-                req.flagSeen = req.flagSeen or now
-                if now - req.flagSeen < 0.4 then return end
-            elseif req.wasTouch and not req.btnDone then
-                -- 모바일: ESC(키보드 입력) 대신 상단바 메뉴 버튼을 직접 눌러서 열어봄
-                if not req.btnStep then
-                    req.btn = findMenuButton()
-                    req.log[#req.log + 1] = "btn=" .. (req.btn and req.btn:GetFullName() or "none")
-                    if not req.btn then
-                        req.btnDone = true
-                        return
-                    end
-                    req.btnStep = 1
-                    req.btnAt = now
-                    req.log[#req.log + 1] = "btn-activated=" .. tostring(fireSignal(req.btn.Activated))
-                    return
-                elseif req.btnStep == 1 then
-                    if now - req.btnAt < 0.8 then return end -- 열리면 위의 open 검사에서 처리됨
-                    req.btnStep = 2
-                    req.btnAt = now
-                    req.log[#req.log + 1] = "btn-click=" .. tostring(fireSignal(req.btn.MouseButton1Click))
-                    return
-                else
-                    if now - req.btnAt < 0.8 then return end
-                    req.btnDone = true
-                    return
-                end
-            end
-            req.attempt = 1
-            req.nextAt = now
-            return
+        -- 엔진 플래그는 켜졌는데 UI가 아직 안 보임 (열리는 중일 수 있음) → 또 눌러서 닫아버리지 않게 기다림
+        if GuiService.MenuIsOpen then
+            req.flagSeen = req.flagSeen or now
+            if now - req.flagSeen < 1.5 then return end
+        else
+            req.flagSeen = nil
         end
 
         if now < req.nextAt then return end
 
-        if req.attempt == 1 or req.attempt == 2 then
-            if req.attempt == 2 and GuiService.MenuIsOpen then
-                req.attempt = 3 -- 이미 켜져 있는데 ESC를 또 누르면 닫히므로 건너뜀
+        local name = req.steps[req.step]
+        if not name then
+            -- 자동으로 못 열었음: 사용자가 직접 열 때까지 대기
+            if not req.warned then
+                req.warned = true
+                req.deadline = req.t0 + 60
+                req.log[#req.log + 1] = "flag=" .. tostring(GuiService.MenuIsOpen)
+                warn("[CrunoUI] ShowTab: 설정창을 자동으로 열지 못함 [" .. table.concat(req.log, ", ")
+                    .. "] identity=" .. identityStr()
+                    .. " - 직접 열면 '" .. w.Name .. "' 탭이 자동으로 선택됩니다."
+                    .. (req.wasTouch and " (모바일이라 ESC는 보내지 않음)" or ""))
+            end
+            return
+        end
+        req.step += 1
+        req.nextAt = now + (STEP_WAIT[name] or 0.9)
+
+        if name == "signal" or name == "click" or name == "tapA" or name == "tapB" then
+            local btn = req.btn
+            if not (btn and btn.Parent) then
+                btn = findMenuButton()
+                req.btn = btn
+                local desc = btn and btn:GetFullName() or "none"
+                if req.btnLog ~= desc then
+                    req.btnLog = desc
+                    req.log[#req.log + 1] = "btn=" .. desc
+                end
+            end
+            if not btn then
+                -- 상단바가 아직 안 만들어졌을 수 있으니 3초까지는 같은 단계를 다시 시도
+                req.noBtn = req.noBtn or now
+                if now - req.noBtn < 3 then
+                    req.step -= 1
+                    req.nextAt = now + 0.3
+                else
+                    req.nextAt = now
+                end
                 return
             end
-            if req.wasTouch then guardOn(0.8) end -- ESC 키 입력이 게임에 Keyboard 변경으로 보이지 않게 보호
-            local how = pressEscape()
-            req.log[#req.log + 1] = "esc" .. req.attempt .. "=" .. tostring(how)
-            if how then
-                req.escUsed = true
-                scheduleRestore(req.wasTouch) -- ESC 직후 입력 장치가 키보드로 바뀌는 것을 되돌림
-                req.attempt += 1
-                req.nextAt = now + 1.2
+            req.noBtn = nil
+            if name == "signal" then
+                req.log[#req.log + 1] = "signal=" .. tostring(fireSignal(btn.Activated))
+            elseif name == "click" then
+                req.log[#req.log + 1] = "click=" .. tostring(fireSignal(btn.MouseButton1Click))
             else
-                req.attempt = 3
+                local c = tapCandidates(btn)
+                local pt = (name == "tapA") and c[1] or c[2]
+                if name == "tapB" and math.abs(c[1][2] - c[2][2]) < 1 then
+                    req.nextAt = now -- 두 후보 좌표가 같으면 중복 터치 생략
+                    return
+                end
+                req.log[#req.log + 1] = name .. "=" .. tostring(sendTap(pt[1], pt[2]))
             end
-        elseif req.attempt == 3 then
-            req.log[#req.log + 1] = "flag=" .. tostring(GuiService.MenuIsOpen)
-            req.attempt = 5
-            req.deadline = req.t0 + 60
-            warn("[CrunoUI] ShowTab: 설정창을 자동으로 열지 못함 [" .. table.concat(req.log, ", ")
-                .. "] identity=" .. identityStr()
-                .. " - ESC로 직접 열면 '" .. w.Name .. "' 탭이 자동으로 선택됩니다.")
+
+        elseif name == "esc" then
+            if req.escSent and GuiService.MenuIsOpen then
+                req.nextAt = now -- 이미 켜져 있는데 ESC를 또 누르면 닫히므로 건너뜀
+                return
+            end
+            if req.wasTouch then
+                req.nextAt = now -- 모바일은 어떤 경우에도 ESC(키보드 입력)를 보내지 않음
+                return
+            end
+            local how = pressEscape()
+            req.log[#req.log + 1] = "esc=" .. tostring(how)
+            if how then
+                req.escSent = true
+                req.escUsed = true
+                scheduleRestore(req.wasTouch, true) -- ESC 직후 입력 장치가 키보드로 바뀌는 것을 되돌림
+            else
+                req.nextAt = now
+                req.step = #req.steps + 1 -- ESC를 보낼 방법이 없음: 남은 단계 건너뜀
+            end
         end
 
     elseif req.phase == "reveal" then
@@ -1963,22 +2045,20 @@ function Lib.ShowTab(a, b)
     end
     showToken += 1
     local now = os.clock()
-    -- 한 번이라도 모바일로 판단되면 계속 모바일로 취급 (ESC 직후 입력 장치가 Keyboard로 바뀌어도 유지)
-    local wasTouch = isTouchDevice() or spoof.touch == true
-    if wasTouch then
-        spoof.on = true -- 원래 모바일이면 게임에는 계속 터치로 보이게 함
-        spoof.touch = true
-    end
+    local wasTouch, why = isTouchDevice()
+    spoof.on = wasTouch and true or false -- 모바일이면 게임에는 계속 터치로 보이게 함
+    if wasTouch and why ~= "force" then spoof.touch = true end
     show = {
         w = w,
         token = showToken,
         phase = "open",
-        attempt = 0,
+        step = 1,
         nextAt = 0,
         t0 = now,
-        deadline = now + 8,
-        log = {},
+        deadline = now + 14,
+        log = {"mobile=" .. tostring(wasTouch) .. "(" .. tostring(why) .. ")"},
         wasTouch = wasTouch,
+        steps = buildSteps(wasTouch),
     }
     return true
 end
