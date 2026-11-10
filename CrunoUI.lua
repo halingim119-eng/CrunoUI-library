@@ -32,7 +32,8 @@ end
 elevate()
 
 local Lib = {
-    Version = "1.2.9",
+    Version = "1.3.0",
+    Debug = false, -- true로 바꾸면 ShowTab 진행 로그를 print로 출력
     Flags = {},
     ConfigFolder = "CrunoUI",
     PickerYOffset = 0,
@@ -648,15 +649,10 @@ local function buildProfile(w, scroll, probe, showIP)
         end
     end)
 
-    local headshot = make("ImageLabel", {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
-        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Image = ""}, avatar)
-    corner(headshot, 999)
-    task.spawn(function()
-        local ok, img = pcall(function()
-            return Players:GetUserThumbnailAsync(lp.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size420x420)
-        end)
-        if ok then headshot.Image = img end
-    end)
+    -- 플레이어 헤드샷 이미지 대신 user 아이콘 사용
+    icon(avatar, {"user", "user-round"}, {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromScale(0.6, 0.6)})
+
     icon(thumb, {"gamepad", "gamepad-2"}, {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
         Size = UDim2.fromScale(1.05, 1.05)})
 
@@ -1584,16 +1580,19 @@ local function findWindow(x)
     end
 end
 
--- ===== ShowTab (v1.2.9) =====
+-- ===== ShowTab (v1.3.0) =====
 -- 새 스레드 / require / 대기(yield) 없이, Heartbeat 콜백에서 상태머신으로 진행한다.
 -- CoreGui를 읽는 곳은 전부 pcall로 보호하고, 읽기가 막히면 GuiService.MenuIsOpen으로 대신 판단한다.
--- 설정창은 가상 ESC로만 연다 (SetMenuIsOpen API는 값만 바꾸고 창을 열지 않으므로 사용하지 않음).
--- 가상 ESC 때문에 게임이 PC로 인식해 모바일 버튼이 사라지는 문제 (v1.2.8 ~ 수정):
---   (1) ESC를 보내는 순간만 LastInputTypeChanged 연결을 잠깐 꺼서
---       게임이 Keyboard 변경을 못 보게 하고, 끝나면 다시 켜고 Touch를 보냄
---   (2) 원래 모바일이면 GetLastInputType()이 계속 Touch를 돌려주도록 후킹
---       (__namecall + hookfunction: 점 호출 방식도 커버, 게임 스크립트 호출에만 적용)
---   (3) LastInputTypeChanged 신호에 Touch를 보내서 컨트롤을 다시 켬
+-- SetMenuIsOpen API는 값만 바꾸고 창을 열지 않으므로 사용하지 않는다.
+--
+-- 가상 ESC(키보드 입력)를 보내면 게임이 PC로 인식해 모바일 버튼이 사라지는 문제 (v1.3.0):
+--   (1) 모바일이면 ESC를 아예 보내지 않고, 상단바의 Roblox 메뉴 버튼을 직접 눌러서 연다
+--       (버튼의 Activated 신호를 발생시킴 → 키보드 입력이 생기지 않음)
+--   (2) 메뉴 버튼을 못 찾거나 안 열리면 ESC로 열되, 그 순간만 LastInputTypeChanged 연결을 잠깐 꺼서
+--       게임이 Keyboard 변경을 못 보게 하고, 끝나면 다시 켬
+--   (3) ESC를 쓴 경우 엔진의 실제 입력 장치를 되돌리기 위해, 우리 페이지의 빈 곳에 가상 터치를 한 번 보냄
+--   (4) GetLastInputType()이 Touch를 돌려주도록 후킹 (__namecall + hookfunction, 게임 스크립트 호출에만 적용)
+--   (5) LastInputTypeChanged 신호에 Touch를 보내서 컨트롤을 다시 켬
 
 local function getShield()
     return follow(CoreGui, "RobloxGui", "SettingsClippingShield", "SettingsShield")
@@ -1613,7 +1612,7 @@ local function readMenu()
     return true, onScreen, vis
 end
 
--- 느슨: 화면 안에 있고 (Visible 이거나 엔진 플래그가 켜져 있음). 못 읽으면 엔진 플래그만 신뢰
+-- 화면 안에 있고 (Visible 이거나 엔진 플래그가 켜져 있음). 못 읽으면 엔진 플래그만 신뢰
 local function menuOpenLoose()
     local readable, onScreen, vis = readMenu()
     if readable then return (onScreen and (vis or GuiService.MenuIsOpen)) and true or false end
@@ -1640,6 +1639,44 @@ local function pressEscape()
         return "keypress"
     end
     return nil
+end
+
+-- 신호를 직접 발생시킴 (입력 이벤트가 아니라서 입력 장치가 바뀌지 않음)
+local function fireSignal(sig)
+    if firesignal and pcall(firesignal, sig) then return true end
+    if getconnections then
+        local ok, list = pcall(getconnections, sig)
+        if ok and type(list) == "table" and #list > 0 then
+            for _, c in ipairs(list) do pcall(function() c:Fire() end) end
+            return true
+        end
+    end
+    return false
+end
+
+-- 상단바의 Roblox 메뉴 버튼 찾기 (경로에 "MenuIcon"이 들어간 버튼, TriggerPoint 우선)
+local function findMenuButton()
+    local top = follow(CoreGui, "TopBarApp")
+    if not top then return nil end
+    local ok, list = pcall(function() return top:GetDescendants() end)
+    if not ok then
+        elevate()
+        ok, list = pcall(function() return top:GetDescendants() end)
+    end
+    if not ok then return nil end
+    local best, bestScore = nil, 0
+    for _, d in ipairs(list) do
+        if d:IsA("GuiButton") and d.AbsoluteSize.X > 0 and d.AbsoluteSize.Y > 0 then
+            local full = d:GetFullName():lower()
+            local score = 0
+            if full:find("menuicon", 1, true) then
+                score = 2
+                if d.Name:lower() == "triggerpoint" then score = 3 end
+            end
+            if score > bestScore then best, bestScore = d, score end
+        end
+    end
+    return best
 end
 
 -- 마지막 입력 장치 (속성이 아니라 함수). 라이브러리 내부 호출이라 후킹의 영향을 받지 않음
@@ -1719,6 +1756,29 @@ local function scheduleRestore(wasTouch)
     end
 end
 
+-- 엔진의 "실제" 마지막 입력 장치를 Touch로 되돌리기 위해, 우리 페이지 맨 위 빈 곳(스크롤 패딩 영역)에
+-- 가상 터치를 한 번 보냄. 아무 버튼도 없는 곳이라 동작에는 영향 없음.
+local function tapRestoreTouch()
+    if destroyed or not Env then return end
+    local w = active
+    if not w or not w.page or not w.page.Parent or not w.page.Visible then return end
+    local vimOk, vim = pcall(function() return game:GetService("VirtualInputManager") end)
+    if not vimOk or not vim then return end
+    local p, s = w.page.AbsolutePosition, w.page.AbsoluteSize
+    if s.X <= 0 or s.Y <= 0 then return end
+    local inset = 0
+    local sg = w.page:FindFirstAncestorWhichIsA("ScreenGui")
+    if not (sg and sg.IgnoreGuiInset) then
+        local ok, a = pcall(function() return GuiService:GetGuiInset() end)
+        if ok and a then inset = a.Y end
+    end
+    local x, y = p.X + s.X / 2, p.Y + inset + 3
+    pcall(function() vim:SendTouchEvent(9, 0, x, y) end)
+    task.delay(0.05, function()
+        pcall(function() vim:SendTouchEvent(9, 2, x, y) end)
+    end)
+end
+
 -- 입력 장치 보호: ESC 키 입력 순간에 게임이 Keyboard 변경을 못 보게 함.
 -- LastInputTypeChanged 연결을 잠깐 끄고(Disable), 시간이 지나면 다시 켜고 Touch를 보냄
 local guard = {active = false, conns = {}, untilT = 0}
@@ -1744,6 +1804,7 @@ local function guardOff()
     guard.conns = {}
     for _, c in ipairs(list) do pcall(function() c:Enable() end) end
     scheduleRestore(true)
+    task.delay(0.15, tapRestoreTouch)
 end
 
 -- 설정창을 닫을 때도 입력 장치가 바뀔 수 있으니 한 번 더
@@ -1757,7 +1818,11 @@ local lastErr, lastErrT = nil, 0
 
 local function endShow(req)
     if show == req then show = nil end
+    if Lib.Debug then
+        print("[CrunoUI] ShowTab log: [" .. table.concat(req.log, ", ") .. "]")
+    end
     scheduleRestore(req.wasTouch)
+    if req.wasTouch and req.escUsed then task.delay(0.1, tapRestoreTouch) end
 end
 
 local function stepShow(req, now)
@@ -1785,6 +1850,30 @@ local function stepShow(req, now)
                 -- 엔진 플래그는 켜졌는데 UI가 아직 안 보임 (열리는 중일 수 있음) → ESC로 닫아버리지 않게 잠깐 기다림
                 req.flagSeen = req.flagSeen or now
                 if now - req.flagSeen < 0.4 then return end
+            elseif req.wasTouch and not req.btnDone then
+                -- 모바일: ESC(키보드 입력) 대신 상단바 메뉴 버튼을 직접 눌러서 열어봄
+                if not req.btnStep then
+                    req.btn = findMenuButton()
+                    req.log[#req.log + 1] = "btn=" .. (req.btn and req.btn:GetFullName() or "none")
+                    if not req.btn then
+                        req.btnDone = true
+                        return
+                    end
+                    req.btnStep = 1
+                    req.btnAt = now
+                    req.log[#req.log + 1] = "btn-activated=" .. tostring(fireSignal(req.btn.Activated))
+                    return
+                elseif req.btnStep == 1 then
+                    if now - req.btnAt < 0.8 then return end -- 열리면 위의 open 검사에서 처리됨
+                    req.btnStep = 2
+                    req.btnAt = now
+                    req.log[#req.log + 1] = "btn-click=" .. tostring(fireSignal(req.btn.MouseButton1Click))
+                    return
+                else
+                    if now - req.btnAt < 0.8 then return end
+                    req.btnDone = true
+                    return
+                end
             end
             req.attempt = 1
             req.nextAt = now
@@ -1802,6 +1891,7 @@ local function stepShow(req, now)
             local how = pressEscape()
             req.log[#req.log + 1] = "esc" .. req.attempt .. "=" .. tostring(how)
             if how then
+                req.escUsed = true
                 scheduleRestore(req.wasTouch) -- ESC 직후 입력 장치가 키보드로 바뀌는 것을 되돌림
                 req.attempt += 1
                 req.nextAt = now + 1.2
